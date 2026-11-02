@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -17,6 +17,7 @@ let docs: string; // a companion "docs" checkout of another repository
 let wt: string; // a worktree of the docs checkout
 let other: string; // a third repository that also holds docs/ai/OPERATING-SYSTEM.md
 let codeWt: string; // a worktree of the cwd checkout on another branch
+let plain: string; // a directory outside git that holds docs/ai/OPERATING-SYSTEM.md
 
 function put(path: string, text = "x\n") {
 	mkdirSync(dirname(path), { recursive: true });
@@ -90,6 +91,8 @@ beforeAll(() => {
 	execFileSync("git", ["-C", code, "worktree", "add", "-q", codeWt, "-b", "feature"], { stdio: "pipe" });
 	put(join(codeWt, "feature/new.ts"));
 	symlinkSync(join(base, "work"), join(base, "link"));
+	plain = join(base, "work", "plain");
+	put(join(plain, "docs/ai/OPERATING-SYSTEM.md"));
 });
 
 afterAll(() => rmSync(base, { recursive: true, force: true }));
@@ -163,6 +166,11 @@ describe("read: wrong checkout", () => {
 		expect(call("read", { path: "feature/new.ts" })).toBeUndefined();
 	});
 
+	test("a root outside git proves nothing, so its copy is listed, not chosen", () => {
+		const { call } = load([plain]);
+		expect(call("read", { path: "docs/ai/OPERATING-SYSTEM.md" })).toBeUndefined();
+	});
+
 	test("a relative path that two other repositories hold is listed, not chosen", () => {
 		const { call, result, lastText } = load([docs, other]);
 		expect(call("read", { path: "docs/ai/OPERATING-SYSTEM.md" })).toBeUndefined();
@@ -220,6 +228,16 @@ describe("edit: header paths", () => {
 		});
 	});
 
+	test("a tag that identical copies share does not pick one of them", () => {
+		const { call, result } = load();
+		const mine = join(wt, "docs/ai/work/T-1/packet.md");
+		const copy = join(other, "docs/ai/work/T-1/packet.md");
+		put(copy);
+		result("read", { path: mine }, `[${mine}#AB12]\n1:x`, false);
+		result("grep", { path: other }, `[${copy}#AB12]\n1:x`, false);
+		expect(call("edit", { input: "[packet.md#AB12]\nPUT 1.=1:\n+y\n" })).toBeUndefined();
+	});
+
 	test("an unknown tag with no unique match is left for the tool to reject, then suggestions follow", () => {
 		const { call, result, lastText } = load([docs]);
 		const input = { input: "[docs/ai/work/T-1/packet.md#0000]\nPUT 1.=1:\n+y\n" };
@@ -248,6 +266,27 @@ describe("bash: missing script", () => {
 });
 
 describe("leaves real paths alone and fails open", () => {
+	test("a git lookup killed by its timeout blocks the rewrite once and is asked again later", () => {
+		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+		const bin = mkdtempSync(join(tmpdir(), "slow-git-"));
+		const fake = join(bin, "git");
+		writeFileSync(fake, `#!/bin/sh\ncase "$*" in *--git-common-dir*) sleep 3;; esac\nexec "${realGit}" "$@"\n`);
+		chmodSync(fake, 0o755);
+		const { call } = load([docs]);
+		const savedPath = process.env.PATH;
+		process.env.PATH = `${bin}:${savedPath}`;
+
+		try {
+			expect(call("read", { path: "scripts/ai/release_train.py" })).toBeUndefined();
+		} finally {
+			process.env.PATH = savedPath;
+		}
+
+		expect(call("read", { path: "scripts/ai/release_train.py" })).toEqual({
+			input: { path: join(docs, "scripts/ai/release_train.py") },
+		});
+	});
+
 	test("existing paths, internal URLs and globs are untouched", () => {
 		const { call } = load([docs]);
 		expect(call("read", { path: "README.md" })).toBeUndefined();

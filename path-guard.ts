@@ -92,7 +92,7 @@ const SNAPSHOT_HEADER = /^\[([^\]\n]+)#([0-9A-F]{4})\]/gm;
 const BASH_MISSING = [
 	/can't open file '([^']+)'/g,
 	/Could not open input file: (\S+)/g,
-	/^(?:\/bin\/)?(?:bash|sh|zsh|env): (?:line \d+: )?([^\s:'"]+): No such file or directory/gm,
+	/^(?:\/bin\/)?(?:bash|sh|zsh): (?:line \d+: )?([^\s:'"]+): No such file or directory/gm,
 ];
 
 export function expandHome(p: string): string {
@@ -157,13 +157,22 @@ export function editDistance(a: string, b: string): number {
 	return prev[y.length];
 }
 
-/** Wall-clock end of the current handler's git budget; omp blocks a tool call whose tool_call handler stalls. */
+/**
+ * Wall-clock end of the current handler's git budget; omp blocks a tool call whose tool_call handler
+ * stalls. Each handler resets it; a direct PathGuard caller keeps the last value.
+ */
 let gitDeadline = Number.POSITIVE_INFINITY;
 
-function git(args: string[], cwd: string): string | undefined {
+/** A git answer, or `answered: false` when the budget skipped the call or its timeout killed it. */
+interface GitAnswer {
+	answered: boolean;
+	out?: string;
+}
+
+function git(args: string[], cwd: string): GitAnswer {
 	const left = gitDeadline - Date.now();
 
-	if (left <= 0) return undefined;
+	if (left <= 0) return { answered: false };
 
 	try {
 		const r = spawnSync("git", ["-c", "core.fsmonitor=false", "-C", cwd, ...args], {
@@ -172,10 +181,24 @@ function git(args: string[], cwd: string): string | undefined {
 			maxBuffer: 64 * 1024 * 1024,
 		});
 
-		return r.status === 0 ? r.stdout : undefined;
+		if (r.error || r.signal) return { answered: false };
+
+		return { answered: true, out: r.status === 0 ? r.stdout : undefined };
 	} catch {
-		return undefined;
+		return { answered: false };
 	}
+}
+
+/** Run git once per key; cache only real answers so a skipped or killed call is retried later. */
+function cachedGit<T>(cache: Map<string, T | null>, key: string, args: string[], parse: (out: string) => T | null) {
+	if (!cache.has(key)) {
+		const r = git(args, key);
+
+		if (!r.answered) return undefined;
+		cache.set(key, r.out === undefined ? null : parse(r.out));
+	}
+
+	return cache.get(key) ?? undefined;
 }
 
 function isDir(p: string): boolean {
@@ -234,11 +257,12 @@ export function loadConfig(z: typeof Zod, file = join(homedir(), ".omp", "agent"
 
 /** Per-session memory of real paths and snapshot tags, plus the path logic. */
 export class PathGuard {
-	readonly tags = new Map<string, string>();
+	/** Snapshot tag -> every file seen with it; identical copies in two worktrees share a tag. */
+	readonly tags = new Map<string, Set<string>>();
 	readonly recent: string[] = [];
 	#top = new Map<string, string | null>();
 	#common = new Map<string, string | null>();
-	#worktrees = new Map<string, string[]>();
+	#worktrees = new Map<string, string[] | null>();
 	#files = new Map<string, string[] | null>();
 	#configRoots: string[];
 
@@ -263,7 +287,8 @@ export class PathGuard {
 		for (const m of text.matchAll(SNAPSHOT_HEADER)) {
 			if (SCHEME.test(m[1])) continue;
 			const abs = toAbs(m[1], cwd);
-			this.tags.set(m[2].toUpperCase(), abs);
+			const tag = m[2].toUpperCase();
+			this.tags.set(tag, (this.tags.get(tag) ?? new Set<string>()).add(abs));
 
 			if (focused) this.remember(abs);
 		}
@@ -273,45 +298,34 @@ export class PathGuard {
 		const existing = nearestExisting(dir);
 		const start = isDir(existing) ? existing : dirname(existing);
 
-		if (!this.#top.has(start)) this.#top.set(start, git(["rev-parse", "--show-toplevel"], start)?.trim() || null);
-
-		return this.#top.get(start) ?? undefined;
+		return cachedGit(this.#top, start, ["rev-parse", "--show-toplevel"], out => out.trim() || null);
 	}
 
 	/** The shared git directory: equal for every worktree of one repository. */
 	repoOf(root: string): string | undefined {
-		if (!this.#common.has(root)) {
-			const out = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root)?.trim();
-			this.#common.set(root, out || null);
-		}
-
-		return this.#common.get(root) ?? undefined;
+		return cachedGit(this.#common, root, ["rev-parse", "--path-format=absolute", "--git-common-dir"], out => out.trim() || null);
 	}
 
 	worktrees(root: string): string[] {
-		if (!this.#worktrees.has(root)) {
-			const out = git(["worktree", "list", "--porcelain"], root) ?? "";
-
-			const list = out
+		const list = cachedGit(this.#worktrees, root, ["worktree", "list", "--porcelain"], out =>
+			out
 				.split("\n")
 				.filter(l => l.startsWith("worktree "))
 				.map(l => l.slice(9))
-				.filter(isDir);
+				.filter(isDir),
+		);
 
-			this.#worktrees.set(root, list);
-		}
-
-		return this.#worktrees.get(root) ?? [];
+		return list ?? [];
 	}
 
 	files(root: string): string[] {
-		if (!this.#files.has(root)) {
-			const out = git(["ls-files", "-z"], root);
-			const list = out ? out.split("\0").filter(Boolean) : null;
-			this.#files.set(root, list && list.length <= MAX_LS_FILES ? list : null);
-		}
+		const list = cachedGit(this.#files, root, ["ls-files", "-z"], out => {
+			const all = out.split("\0").filter(Boolean);
 
-		return this.#files.get(root) ?? [];
+			return all.length <= MAX_LS_FILES ? all : null;
+		});
+
+		return list ?? [];
 	}
 
 	/** Roots in trust order: roots of recently used files, the cwd repo, configured companion roots. */
@@ -442,12 +456,15 @@ export class PathGuard {
 		const { root, tail, trusted } = this.relocations(raw, cwd);
 		// A relative path was written against the cwd repository; its other worktrees are other branches.
 		const baseRepo = this.repoOf(root ?? this.gitTop(cwd) ?? cwd);
-		const repoOfPath = (p: string) => this.repoOf(this.gitTop(p) ?? p);
-		// A bare file name (AGENTS.md, README.md) means a different file in every repository.
-		const elsewhere = tail.includes(sep) ? trusted.filter(p => repoOfPath(p) !== baseRepo) : [];
+		const repos = trusted.map(p => this.repoOf(this.gitTop(p) ?? p));
+		// Every repository must be known: an unanswered or non-git lookup proves nothing.
+		const known = baseRepo !== undefined && repos.every(r => r !== undefined);
+		const elsewhere = trusted.filter((_, i) => repos[i] !== baseRepo);
+		const otherRepos = new Set(repos.filter(r => r !== baseRepo));
 
+		// A bare file name (AGENTS.md, README.md) means a different file in every repository.
 		// Rewrite only when one other repository has the path; its most recently used root wins.
-		if (elsewhere.length > 0 && new Set(elsewhere.map(repoOfPath)).size === 1) {
+		if (known && tail.includes(sep) && otherRepos.size === 1) {
 			return { path: elsewhere[0], why: `same path under ${this.gitTop(elsewhere[0]) ?? "a known root"}` };
 		}
 
@@ -465,9 +482,14 @@ export class PathGuard {
 		const out = patch.replace(EDIT_HEADER, (line, p: string, tag: string) => {
 			if (SCHEME.test(p) || existsSync(toAbs(p, cwd))) return line;
 			const want = normalize(expandHome(p)).replace(/^(\.\/)+/, "");
-			// The tag names a file this session saw; a matching file name is enough proof.
-			const known = this.tags.get(tag.toUpperCase());
-			const hit = known && existsSync(known) && basename(known) === basename(want) ? known : undefined;
+
+			// The tag names files this session saw. Identical copies share a tag, so only a single
+			// existing file with that tag and this file name is proof.
+			const matches = [...(this.tags.get(tag.toUpperCase()) ?? [])].filter(
+				f => basename(f) === basename(want) && existsSync(f),
+			);
+
+			const hit = matches.length === 1 ? matches[0] : undefined;
 
 			if (!hit) return line;
 			changes.push([p, hit]);
