@@ -266,6 +266,8 @@ describe("bash: missing script", () => {
 });
 
 describe("leaves real paths alone and fails open", () => {
+	const SLOW_GIT_TEST_MS = 15_000; // two git calls are killed at 2 s each
+
 	test("a git lookup killed by its timeout blocks the rewrite once and is asked again later", () => {
 		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
 		const bin = mkdtempSync(join(tmpdir(), "slow-git-"));
@@ -280,12 +282,13 @@ describe("leaves real paths alone and fails open", () => {
 			expect(call("read", { path: "scripts/ai/release_train.py" })).toBeUndefined();
 		} finally {
 			process.env.PATH = savedPath;
+			rmSync(bin, { recursive: true, force: true });
 		}
 
 		expect(call("read", { path: "scripts/ai/release_train.py" })).toEqual({
 			input: { path: join(docs, "scripts/ai/release_train.py") },
 		});
-	});
+	}, SLOW_GIT_TEST_MS);
 
 	test("existing paths, internal URLs and globs are untouched", () => {
 		const { call } = load([docs]);
