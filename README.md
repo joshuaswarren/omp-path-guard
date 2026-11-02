@@ -57,6 +57,14 @@ the session already used:
 { "roots": ["~/src/project-code", "~/src/project-docs"] }
 ```
 
+## Do not combine with a path-confinement guard
+
+omp gives every other extension's `tool_call` handler the input that the model
+wrote, not the input that this extension rewrote. A guard that confines paths
+(for example "only inside this checkout") therefore checks the old path, while
+the tool reads the new one. Do not load path-guard in a session that relies on
+such a guard.
+
 ## Develop
 
 ```sh
