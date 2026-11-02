@@ -15,6 +15,8 @@ let base: string;
 let code: string; // the session cwd: a "code" checkout
 let docs: string; // a companion "docs" checkout of another repository
 let wt: string; // a worktree of the docs checkout
+let other: string; // a third repository that also holds docs/ai/OPERATING-SYSTEM.md
+let codeWt: string; // a worktree of the cwd checkout on another branch
 
 function put(path: string, text = "x\n") {
 	mkdirSync(dirname(path), { recursive: true });
@@ -82,6 +84,12 @@ beforeAll(() => {
 	execFileSync("git", ["-C", docs, "worktree", "add", "-q", wt, "-b", "fix-1"], { stdio: "pipe" });
 	put(join(wt, "docs/ai/work/T-1/packet.md"));
 	put(join(wt, "docs/ai/OPERATING-SYSTEM.md"), "worktree copy\n");
+	other = join(base, "work", "mirror");
+	repo(other, ["docs/ai/OPERATING-SYSTEM.md"]);
+	codeWt = join(base, "work", "checkout-wt");
+	execFileSync("git", ["-C", code, "worktree", "add", "-q", codeWt, "-b", "feature"], { stdio: "pipe" });
+	put(join(codeWt, "feature/new.ts"));
+	symlinkSync(join(base, "work"), join(base, "link"));
 });
 
 afterAll(() => rmSync(base, { recursive: true, force: true }));
@@ -100,9 +108,14 @@ describe("read: wrong checkout", () => {
 		);
 	});
 
+	test("a grep keeps its other options when its path is moved", () => {
+		const { call } = load([docs]);
+		const out = call("grep", { path: join(code, "scripts/ai/release_train.py"), pattern: "x", case: "true" });
+		expect(out).toEqual({ input: { path: join(docs, "scripts/ai/release_train.py"), pattern: "x", case: "true" } });
+	});
+
 	test("a path written through a symlinked parent still finds its checkout", () => {
 		const { pathAfter } = load([docs]);
-		symlinkSync(join(base, "work"), join(base, "link"));
 		expect(pathAfter("read", { path: join(base, "link", "checkout", "scripts/ai/release_train.py") })).toBe(
 			join(docs, "scripts/ai/release_train.py"),
 		);
@@ -141,6 +154,28 @@ describe("read: wrong checkout", () => {
 		const packet = join(wt, "docs/ai/work/T-1/packet.md");
 		result("read", { path: packet }, `[${packet}#AB12]\n1:x`, false);
 		expect(call("read", { path: join(docs, "docs/ai/work/T-1/packet.md") })).toBeUndefined();
+	});
+
+	test("a relative path is not moved to a sibling worktree of the cwd repository", () => {
+		const { call, result } = load([docs]);
+		const fresh = join(codeWt, "feature/new.ts");
+		result("read", { path: fresh }, `[${fresh}#CD34]\n1:x`, false);
+		expect(call("read", { path: "feature/new.ts" })).toBeUndefined();
+	});
+
+	test("a relative path that two other repositories hold is listed, not chosen", () => {
+		const { call, result, lastText } = load([docs, other]);
+		expect(call("read", { path: "docs/ai/OPERATING-SYSTEM.md" })).toBeUndefined();
+		const text = lastText(result("read", { path: "docs/ai/OPERATING-SYSTEM.md" }, "Path not found", true));
+		expect(text).toContain(join(docs, "docs/ai/OPERATING-SYSTEM.md"));
+		expect(text).toContain(join(other, "docs/ai/OPERATING-SYSTEM.md"));
+	});
+
+	test("a wide grep does not change which root the session is working in", () => {
+		const { result, pathAfter } = load([docs]);
+		const hit = join(wt, "docs/ai/work/T-1/packet.md");
+		result("grep", { path: wt }, `[${hit}#EF56]\n1:x`, false);
+		expect(pathAfter("read", { path: "docs/ai/OPERATING-SYSTEM.md" })).toBe(join(docs, "docs/ai/OPERATING-SYSTEM.md"));
 	});
 });
 
@@ -202,6 +237,13 @@ describe("bash: missing script", () => {
 		expect(lastText(result("bash", { command: "python3 scripts/ai/release_train.py" }, text, true))).toContain(
 			join(docs, "scripts/ai/release_train.py"),
 		);
+	});
+
+	test("successful output and missing programs are left alone", () => {
+		const { result } = load([docs]);
+		const source = `print("can't open file '${join(code, "scripts/ai/release_train.py")}'")`;
+		expect(result("bash", { command: "cat x.py" }, source, false)).toBeUndefined();
+		expect(result("bash", { command: "python x" }, "env: 'python': No such file or directory", true)).toBeUndefined();
 	});
 });
 

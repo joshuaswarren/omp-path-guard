@@ -77,6 +77,10 @@ const MAX_TYPO_EDITS = 2;
 const MAX_RECENT = 300;
 const RECENT_ROOTS = 40;
 const GIT_TIMEOUT_MS = 2000;
+
+/** All git work one handler call may do; omp's own tool_call budget is 30 s. */
+const HANDLER_BUDGET_MS = 4000;
+const MAX_NOTICES = 100;
 const MAX_LS_FILES = 400_000;
 const NOT_FOUND = /not found|no such file|does not exist|ENOENT/i;
 const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -88,7 +92,7 @@ const SNAPSHOT_HEADER = /^\[([^\]\n]+)#([0-9A-F]{4})\]/gm;
 const BASH_MISSING = [
 	/can't open file '([^']+)'/g,
 	/Could not open input file: (\S+)/g,
-	/^(?:\/bin\/)?(?:bash|sh|zsh|env): (?:line \d+: )?([^\s:]+): No such file or directory/gm,
+	/^(?:\/bin\/)?(?:bash|sh|zsh|env): (?:line \d+: )?([^\s:'"]+): No such file or directory/gm,
 ];
 
 export function expandHome(p: string): string {
@@ -153,11 +157,18 @@ export function editDistance(a: string, b: string): number {
 	return prev[y.length];
 }
 
+/** Wall-clock end of the current handler's git budget; omp blocks a tool call whose tool_call handler stalls. */
+let gitDeadline = Number.POSITIVE_INFINITY;
+
 function git(args: string[], cwd: string): string | undefined {
+	const left = gitDeadline - Date.now();
+
+	if (left <= 0) return undefined;
+
 	try {
-		const r = spawnSync("git", ["-C", cwd, ...args], {
+		const r = spawnSync("git", ["-c", "core.fsmonitor=false", "-C", cwd, ...args], {
 			encoding: "utf8",
-			timeout: GIT_TIMEOUT_MS,
+			timeout: Math.min(GIT_TIMEOUT_MS, left),
 			maxBuffer: 64 * 1024 * 1024,
 		});
 
@@ -244,13 +255,17 @@ export class PathGuard {
 		if (this.recent.length > MAX_RECENT) this.recent.shift();
 	}
 
-	/** Record `[path#TAG]` snapshot headers from a successful read, grep or edit result. */
-	rememberSnapshots(text: string, cwd: string): void {
+	/**
+	 * Record `[path#TAG]` snapshot headers from a successful result. Only files the
+	 * agent read or edited count as recent; a wide grep must not reorder the roots.
+	 */
+	rememberSnapshots(text: string, cwd: string, focused: boolean): void {
 		for (const m of text.matchAll(SNAPSHOT_HEADER)) {
 			if (SCHEME.test(m[1])) continue;
 			const abs = toAbs(m[1], cwd);
 			this.tags.set(m[2].toUpperCase(), abs);
-			this.remember(abs);
+
+			if (focused) this.remember(abs);
 		}
 	}
 
@@ -425,14 +440,17 @@ export class PathGuard {
 		}
 
 		const { root, tail, trusted } = this.relocations(raw, cwd);
+		// A relative path was written against the cwd repository; its other worktrees are other branches.
+		const baseRepo = this.repoOf(root ?? this.gitTop(cwd) ?? cwd);
+		const repoOfPath = (p: string) => this.repoOf(this.gitTop(p) ?? p);
 		// A bare file name (AGENTS.md, README.md) means a different file in every repository.
-		const sameRepo = root ? this.repoOf(root) : undefined;
+		const elsewhere = tail.includes(sep) ? trusted.filter(p => repoOfPath(p) !== baseRepo) : [];
 
-		const moved = tail.includes(sep)
-			? trusted.find(p => !sameRepo || this.repoOf(this.gitTop(p) ?? p) !== sameRepo)
-			: undefined;
+		// Rewrite only when one other repository has the path; its most recently used root wins.
+		if (elsewhere.length > 0 && new Set(elsewhere.map(repoOfPath)).size === 1) {
+			return { path: elsewhere[0], why: `same path under ${this.gitTop(elsewhere[0]) ?? "a known root"}` };
+		}
 
-		if (moved) return { path: moved, why: `same path under ${this.gitTop(moved) ?? "a known root"}` };
 		const fixed = this.segmentRepairs(abs);
 
 		if (fixed.length === 1) return { path: fixed[0], why: "one misspelled directory name corrected" };
@@ -449,13 +467,7 @@ export class PathGuard {
 			const want = normalize(expandHome(p)).replace(/^(\.\/)+/, "");
 			// The tag names a file this session saw; a matching file name is enough proof.
 			const known = this.tags.get(tag.toUpperCase());
-			let hit = known && existsSync(known) && basename(known) === basename(want) ? known : undefined;
-
-			if (!hit) {
-				const seen = [...new Set(this.recent.filter(r => (r === want || r.endsWith(`/${want}`)) && existsSync(r)))];
-
-				if (seen.length === 1) hit = seen[0];
-			}
+			const hit = known && existsSync(known) && basename(known) === basename(want) ? known : undefined;
 
 			if (!hit) return line;
 			changes.push([p, hit]);
@@ -490,6 +502,15 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const z = pi.zod;
 	const guard = new PathGuard(config ?? loadConfig(z));
 	const notices = new Map<string, string[]>();
+
+	/** Keep a notice for the result of this call; calls that never return must not grow the map forever. */
+	const note = (id: string, lines: string[]) => {
+		notices.set(id, lines);
+		const oldest = notices.keys().next().value;
+
+		if (notices.size > MAX_NOTICES && oldest !== undefined) notices.delete(oldest);
+	};
+
 	const PathInput = z.object({ path: z.string() }).passthrough();
 	const EditInput = z.object({ input: z.string() }).passthrough();
 	const BashInput = z.object({ cwd: z.string().optional() });
@@ -511,14 +532,15 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		const { patch, changes } = guard.resolveEdit(parsed.data.input, cwd);
 
 		if (changes.length === 0) return undefined;
-		const lines = changes.map(([from, to]) => `[path-guard] '${from}' does not exist; edited '${to}' (its snapshot tag matches).`);
-		notices.set(event.toolCallId, lines);
+		note(event.toolCallId, changes.map(([from, to]) => `[path-guard] '${from}' does not exist; edited '${to}' (its snapshot tag matches).`));
 
 		return { input: { ...parsed.data, input: patch } };
 	};
 
 	pi.on("tool_call", (event, ctx) => {
 		try {
+			gitDeadline = Date.now() + HANDLER_BUDGET_MS;
+
 			if (event.toolName === "edit") return onEditCall(event, ctx.cwd);
 
 			if (!PATH_TOOLS.has(event.toolName)) return undefined;
@@ -528,7 +550,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			const hit = guard.resolve(target.base, ctx.cwd);
 
 			if (!hit) return undefined;
-			notices.set(event.toolCallId, [`[path-guard] '${target.base}' does not exist; used '${hit.path}' (${hit.why}).`]);
+			note(event.toolCallId, [`[path-guard] '${target.base}' does not exist; used '${hit.path}' (${hit.why}).`]);
 
 			return { input: { ...target.input, path: hit.path + target.sel } };
 		} catch {
@@ -539,13 +561,16 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	/** Suggestion blocks for the missing paths behind a failed call. */
 	const suggestionsFor = (event: ToolResultEvent, cwd: string, text: string): string[] => {
 		if (event.toolName === "bash") {
+			if (!event.isError) return [];
 			const parsed = BashInput.safeParse(event.input);
 			const bashCwd = parsed.success && parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
 			const missing = new Set<string>();
 
 			for (const re of BASH_MISSING) for (const m of text.matchAll(re)) missing.add(m[1]);
 
+			// A bare word (`python3`) is a missing program, not a script path.
 			return [...missing]
+				.filter(p => p.includes("/") || p.includes("."))
 				.slice(0, 2)
 				.flatMap(p => (existsSync(toAbs(p, bashCwd)) ? [] : [formatSuggestions(p, guard.suggest(p, bashCwd))]));
 		}
@@ -560,14 +585,17 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 					: []
 				: [pathOf(event, cwd)?.base ?? ""];
 
+		const globTool = event.toolName !== "read" && event.toolName !== "edit";
+
 		return paths
 			.slice(0, 2)
-			.filter(p => p !== "" && !SCHEME.test(p) && !GLOB_CHARS.test(p) && !existsSync(toAbs(p, cwd)))
+			.filter(p => p !== "" && !SCHEME.test(p) && !(globTool && GLOB_CHARS.test(p)) && !existsSync(toAbs(p, cwd)))
 			.map(p => formatSuggestions(p, guard.suggest(p, cwd)));
 	};
 
 	pi.on("tool_result", (event, ctx) => {
 		try {
+			gitDeadline = Date.now() + HANDLER_BUDGET_MS;
 			const notice = notices.get(event.toolCallId);
 			notices.delete(event.toolCallId);
 			const tracked = event.toolName === "bash" || event.toolName === "edit" || PATH_TOOLS.has(event.toolName);
@@ -576,7 +604,10 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			const text = event.content.map(b => b.text ?? "").join("\n");
 
 			if (!event.isError && event.toolName !== "bash") {
-				if (event.toolName !== "glob" && event.toolName !== "find") guard.rememberSnapshots(text, ctx.cwd);
+				if (event.toolName !== "glob" && event.toolName !== "find") {
+					guard.rememberSnapshots(text, ctx.cwd, event.toolName !== "grep");
+				}
+
 				const target = event.toolName === "read" ? pathOf(event, ctx.cwd) : undefined;
 
 				if (target && existsSync(toAbs(target.base, ctx.cwd))) guard.remember(toAbs(target.base, ctx.cwd));
