@@ -1,0 +1,32 @@
+{
+	"name": "omp-path-guard",
+	"version": "1.0.0",
+	"description": "OMP (oh-my-pi) extension: when a read, grep, glob, find, or edit path does not exist, use the provable real path or list the closest real paths in the error.",
+	"type": "module",
+	"license": "MIT",
+	"author": {
+		"name": "Joshua Warren",
+		"url": "https://github.com/joshuaswarren"
+	},
+	"files": ["path-guard.ts", "README.md", "LICENSE"],
+	"pi": {
+		"extensions": ["./path-guard.ts"]
+	},
+	"scripts": {
+		"test": "bun test",
+		"lint": "oxlint --deny-warnings",
+		"typecheck": "tsc -p ."
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/joshuaswarren/omp-path-guard.git"
+	},
+	"keywords": ["omp", "oh-my-pi", "pi", "extension", "paths"],
+	"devDependencies": {
+		"@oh-my-pi/omptype": "18.16.0",
+		"@oxlint/plugins": "1.90.0",
+		"@types/bun": "1.4.4",
+		"oxlint": "1.90.0",
+		"typescript": "7.0.2"
+	}
+}
