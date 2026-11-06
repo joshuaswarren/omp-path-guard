@@ -371,6 +371,22 @@ describe("bash: home directory typo", () => {
 		expect(call("bash", { command: `ls ${join(dirname(home), "alice")}` })).toBeUndefined();
 		expect(call("bash", { command: `ls ${home}extra-long-suffix/x /var${home}x` })).toBeUndefined();
 	});
+
+	test("quoted text, heredocs, comments and remote commands stay as written", () => {
+		const { call } = load();
+		expect(call("bash", { command: `agent-note mistake "Used ${typo} instead of ${home}"` })).toBeUndefined();
+		expect(call("bash", { command: `printf '%s\\n' '${typo}/file'` })).toBeUndefined();
+		expect(call("bash", { command: `cat > f <<'EOF'\n${typo}/x\nEOF` })).toBeUndefined();
+		expect(call("bash", { command: `ls  # ${typo}` })).toBeUndefined();
+		expect(call("bash", { command: `ssh host ls ${typo}/x` })).toBeUndefined();
+		expect(call("bash", { command: `scp f host:${typo}/x` })).toBeUndefined();
+	});
+
+	test("an unquoted typo beside quoted data is still fixed, and the data is kept", () => {
+		const { call } = load();
+		const out = call("bash", { command: `grep "${typo}" ${typo}/log` });
+		expect(out).toEqual({ input: { command: `grep "${typo}" ${home}/log` } });
+	});
 });
 
 describe("leaves real paths alone and fails open", () => {

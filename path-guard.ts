@@ -107,6 +107,7 @@ const STOPWORDS = new Set(["that", "this", "with", "from", "into", "where", "whi
 /** A GitHub owner slug one letter short of `joshuaswarren`; the real `Joshuawarren` account is someone else's. */
 const OWNER_TYPO = /(?:github\.com[:/]|\brepos\/|(?:^|\s)(?:-R|--repo)(?:\s+|=)['"]?|\bgh\s+repo\s+\w+\s+['"]?)joshuawarren\/([\w.-]+)/gi;
 const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repository not found/i;
+const REMOTE_COMMAND = /(?:^|[\s;&|(])(?:ssh|scp|rsync|sftp)(?:\s|$)/;
 const MAX_HOME_EDITS = 2;
 
 export function expandHome(p: string): string {
@@ -641,8 +642,7 @@ export interface HomeFix {
 
 /**
  * Replace `<home parent>/<name>` where `name` is one or two edits from the user name and that directory
- * does not exist (`/home/jososhuawarren` for `/home/joshuawarren`). The misspelled path cannot work, so
- * the rewrite cannot break a command that would have run.
+ * does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
  */
 export function fixHomeTypos(text: string, home = homedir()): HomeFix {
 	const parent = dirname(home);
@@ -660,6 +660,64 @@ export function fixHomeTypos(text: string, home = homedir()): HomeFix {
 	});
 
 	return { text: fixed, typos: [...typos] };
+}
+
+interface ShellRun {
+	text: string;
+	/** False for quoted text, heredoc bodies and comments: data, not a path the command opens. */
+	code: boolean;
+}
+
+/** `command` cut into unquoted code and quoted/heredoc/comment data; joining the runs gives it back. */
+export function shellRuns(command: string): ShellRun[] {
+	const runs: ShellRun[] = [];
+	let start = 0;
+	let quote = "";
+
+	const cut = (end: number, code: boolean) => {
+		if (end > start) runs.push({ text: command.slice(start, end), code });
+		start = end;
+	};
+
+	for (let i = 0; i < command.length; i++) {
+		const c = command[i];
+
+		if (quote !== "") {
+			if (c === "\\" && quote === '"') i++;
+			else if (c === quote) {
+				cut(i + 1, false);
+				quote = "";
+			}
+
+			continue;
+		}
+
+		if (c === "\\") i++;
+		else if (c === "'" || c === '"') {
+			cut(i, true);
+			quote = c;
+		} else if (command.startsWith("<<", i) || (c === "#" && (i === 0 || /\s/.test(command[i - 1])))) {
+			cut(i, true);
+			cut(command.length, false);
+
+			return runs;
+		}
+	}
+
+	cut(command.length, quote === "");
+
+	return runs;
+}
+
+/**
+ * Home typos in the unquoted part of a local command. Quoted text may be data (an agent-note about the
+ * typo), and a remote command's paths belong to another machine, so both stay as written.
+ */
+export function fixCommandHomeTypos(command: string, home = homedir()): HomeFix {
+	if (REMOTE_COMMAND.test(command)) return { text: command, typos: [] };
+	const runs = shellRuns(command).map(r => (r.code ? fixHomeTypos(r.text, home) : { text: r.text, typos: [] }));
+
+	return { text: runs.map(r => r.text).join(""), typos: [...new Set(runs.flatMap(r => r.typos))] };
 }
 
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
@@ -714,7 +772,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		const parsed = BashCall.safeParse(event.input);
 
 		if (!parsed.success) return undefined;
-		const command = fixHomeTypos(parsed.data.command);
+		const command = fixCommandHomeTypos(parsed.data.command);
 		const cwd = fixHomeTypos(parsed.data.cwd ?? "");
 		const typos = [...new Set([...command.typos, ...cwd.typos])];
 
