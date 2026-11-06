@@ -86,6 +86,7 @@ const NOT_FOUND = /not found|no such file|does not exist|ENOENT/i;
 const SSH_CAP = /^ssh:\/\/: (\/\S+) exceeds the 1 MiB limit/;
 const SSH_URL = /^ssh:\/\/([^/\s]+)\/.*?(?::(-\d+|\d+-\d+))?$/;
 const REMOTE_HEAD_LINES = 200;
+const SHELL_SAFE = /^[\w@%+=:,./~-]+$/;
 const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 const GLOB_CHARS = /[*?[\]{}]/;
 const READ_SELECTOR = /^(.*?)((?::(?:raw|conflicts|img|-?\d[\d+,-]*-?(?::raw)?))+)$/;
@@ -715,20 +716,22 @@ export function commandHomeTypos(command: string, home = homedir()): string[] {
 	return [...new Set(shellRuns(command).flatMap(r => (r.code ? homeTypos(r.text, home) : [])))];
 }
 
-/** A bash command that reads the asked-for part of a remote file the ssh:// reader refused as too large. */
+/**
+ * A bash command that reads the asked-for part of a remote file the ssh:// reader refused as too large.
+ * ssh hands its arguments to the remote shell, so a path or host with any shell syntax gets no command.
+ */
 export function remoteReadCommand(url: string, error: string): string | undefined {
 	const file = SSH_CAP.exec(error)?.[1];
 	const parts = SSH_URL.exec(url);
 
-	if (!file || !parts) return undefined;
+	if (!file || !parts || !SHELL_SAFE.test(file) || !SHELL_SAFE.test(parts[1])) return undefined;
 	const [, host, sel] = parts;
-	const quoted = file.replace(/'/g, "'\\''");
 
-	if (sel?.startsWith("-")) return `ssh ${host} 'tail -n ${sel.slice(1)} ${quoted}'`;
+	if (sel?.startsWith("-")) return `ssh ${host} 'tail -n ${sel.slice(1)} ${file}'`;
 
-	if (sel) return `ssh ${host} 'sed -n ${sel.replace("-", ",")}p ${quoted}'`;
+	if (sel) return `ssh ${host} 'sed -n ${sel.replace("-", ",")}p ${file}'`;
 
-	return `ssh ${host} 'head -n ${REMOTE_HEAD_LINES} ${quoted}'`;
+	return `ssh ${host} 'head -n ${REMOTE_HEAD_LINES} ${file}'`;
 }
 
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {

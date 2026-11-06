@@ -412,6 +412,8 @@ describe("read: ssh:// size cap", () => {
 		const { result, lastText } = load();
 		expect(lastText(result("read", { path: "ssh://host-a/x" }, "ssh://: permission denied", true))).not.toContain("ssh host-a");
 		expect(lastText(result("read", { path: "/tmp/big.log" }, CAP, true))).not.toContain("ssh ");
+		const evil = "ssh://: /tmp/$(touch x).log exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB";
+		expect(lastText(result("read", { path: "ssh://host-a/tmp/$(touch x).log" }, evil, true))).not.toContain("ssh host-a");
 	});
 });
 
