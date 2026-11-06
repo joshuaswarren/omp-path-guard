@@ -33,7 +33,7 @@ the missing name, and tracked files with the same name. It does the same for a
 `bash` command that fails to open a script (`can't open file`,
 `Could not open input file`, `No such file or directory`).
 
-Three related dead ends get a hint in the failed result:
+Four related dead ends get a hint in the failed result:
 
 - **find timeout**: when `find` times out before its judge verified a hit, the
   extension runs an 8-second literal search (`rg`, or `grep` where `rg` is not
@@ -52,6 +52,10 @@ Three related dead ends get a hint in the failed result:
   Quoted text, heredoc bodies and comments are data (for example a note that
   quotes the typo), and `ssh`, `scp`, `rsync` and `sftp` commands name another
   machine's paths, so they get no hint.
+- **large ssh:// file**: when the `ssh://` reader refuses a file over 1 MiB,
+  the result gives a `bash` command that reads only the asked-for part:
+  `tail -n N` for a `:-N` selector, `sed -n A,Bp` for `:A-B`, otherwise
+  `head -n 200`.
 
 Every handler fails open. An internal error never blocks or changes a call.
 

@@ -392,6 +392,31 @@ describe("bash: home directory typo", () => {
 	});
 });
 
+describe("read: ssh:// size cap", () => {
+	const file = "/home/u/.local/state/agent-notes/notes.jsonl";
+	const CAP = `ssh://: ${file} exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB — use an sshfs mount for larger files`;
+
+	const hint = (path: string) => {
+		const { result, lastText } = load();
+
+		return lastText(result("read", { path }, CAP, true));
+	};
+
+	test("a remote file over the cap gets a bash command for the part that was asked for", () => {
+		expect(hint("ssh://host-a/~/.local/state/agent-notes/notes.jsonl:-20")).toContain(`ssh host-a 'tail -n 20 ${file}'`);
+		expect(hint("ssh://host-a/~/.local/state/agent-notes/notes.jsonl:40-60")).toContain(`ssh host-a 'sed -n 40,60p ${file}'`);
+		expect(hint("ssh://host-a/~/.local/state/agent-notes/notes.jsonl")).toContain(`ssh host-a 'head -n 200 ${file}'`);
+	});
+
+	test("other ssh:// errors and local reads get no command", () => {
+		const { result, lastText } = load();
+		expect(lastText(result("read", { path: "ssh://host-a/x" }, "ssh://: permission denied", true))).not.toContain("ssh host-a");
+		expect(lastText(result("read", { path: "/tmp/big.log" }, CAP, true))).not.toContain("ssh ");
+		const evil = "ssh://: /tmp/$(touch x).log exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB";
+		expect(lastText(result("read", { path: "ssh://host-a/tmp/$(touch x).log" }, evil, true))).not.toContain("ssh host-a");
+	});
+});
+
 describe("leaves real paths alone and fails open", () => {
 	const SLOW_GIT_TEST_MS = 15_000; // two git calls are killed at 2 s each
 
