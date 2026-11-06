@@ -96,7 +96,9 @@ const BASH_MISSING = [
 ];
 
 const FIND_TIMED_OUT = /find timed out after/;
-const FALLBACK_TIMEOUT_MS = 4000;
+
+// A cold whole-repository rg took over 4 s live; the find it follows already used 20 s.
+const FALLBACK_TIMEOUT_MS = 8000;
 const MAX_FALLBACK_FILES = 8;
 const MAX_KEYWORDS = 8;
 const QUERY_WORD = /[a-z0-9_][a-z0-9_.-]{3,}/g;
@@ -105,6 +107,8 @@ const STOPWORDS = new Set(["that", "this", "with", "from", "into", "where", "whi
 /** A GitHub owner slug one letter short of `joshuaswarren`; the real `Joshuawarren` account is someone else's. */
 const OWNER_TYPO = /(?:github\.com[:/]|\brepos\/|(?:^|\s)(?:-R|--repo)(?:\s+|=)['"]?|\bgh\s+repo\s+\w+\s+['"]?)joshuawarren\/([\w.-]+)/gi;
 const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repository not found/i;
+const REMOTE_COMMAND = /(?:^|[\s;&|(])(?:ssh|scp|rsync|sftp)(?:\s|$)/;
+const MAX_HOME_EDITS = 2;
 
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
@@ -630,6 +634,84 @@ export function ownerTypoHints(command: string): string[] {
 	);
 }
 
+/**
+ * Each `<home parent>/<name>` in `text` whose whole component is one or two edits from the user name
+ * and does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
+ */
+export function homeTypos(text: string, home = homedir()): string[] {
+	const parent = dirname(home);
+	const user = basename(home);
+
+	if (parent === "/" || text === "") return [];
+	const escaped = parent.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	const names = [...text.matchAll(new RegExp(`(?<![\\w.~-])${escaped}/([^/\\s'"\`;|&()<>:]+)`, "g"))].map(m => m[1]);
+
+	return [
+		...new Set(
+			names.flatMap(name =>
+				name === user || editDistance(name, user) > MAX_HOME_EDITS || existsSync(join(parent, name)) ? [] : [join(parent, name)],
+			),
+		),
+	];
+}
+
+interface ShellRun {
+	text: string;
+	/** False for quoted text, heredoc bodies and comments: data, not a path the command opens. */
+	code: boolean;
+}
+
+/** `command` cut into unquoted code and quoted/heredoc/comment data; joining the runs gives it back. */
+export function shellRuns(command: string): ShellRun[] {
+	const runs: ShellRun[] = [];
+	let start = 0;
+	let quote = "";
+
+	const cut = (end: number, code: boolean) => {
+		if (end > start) runs.push({ text: command.slice(start, end), code });
+		start = end;
+	};
+
+	for (let i = 0; i < command.length; i++) {
+		const c = command[i];
+
+		if (quote !== "") {
+			if (c === "\\" && quote === '"') i++;
+			else if (c === quote) {
+				cut(i + 1, false);
+				quote = "";
+			}
+
+			continue;
+		}
+
+		if (c === "\\") i++;
+		else if (c === "'" || c === '"') {
+			cut(i, true);
+			quote = c;
+		} else if (command.startsWith("<<", i) || (c === "#" && (i === 0 || /\s/.test(command[i - 1])))) {
+			cut(i, true);
+			cut(command.length, false);
+
+			return runs;
+		}
+	}
+
+	cut(command.length, quote === "");
+
+	return runs;
+}
+
+/**
+ * Home typos in the unquoted part of a local command. Quoted text may be data (an agent-note about the
+ * typo), and a remote command's paths belong to another machine, so neither counts.
+ */
+export function commandHomeTypos(command: string, home = homedir()): string[] {
+	if (REMOTE_COMMAND.test(command)) return [];
+
+	return [...new Set(shellRuns(command).flatMap(r => (r.code ? homeTypos(r.text, home) : [])))];
+}
+
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const z = pi.zod;
 	const guard = new PathGuard(config ?? loadConfig(z));
@@ -719,6 +801,12 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (!event.isError) return typos;
 			const bashCwd = parsed.success && parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
+			const homes = parsed.success ? [...commandHomeTypos(parsed.data.command ?? ""), ...homeTypos(parsed.data.cwd ?? "")] : [];
+
+			const homeHints = [...new Set(homes)].map(
+				t => `[path-guard] '${t}' does not exist; the home directory is '${homedir()}'. Retry with that path.`,
+			);
+
 			const missing = new Set<string>();
 
 			for (const re of BASH_MISSING) for (const m of text.matchAll(re)) missing.add(m[1]);
@@ -729,7 +817,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 				.slice(0, 2)
 				.flatMap(p => (existsSync(toAbs(p, bashCwd)) ? [] : [formatSuggestions(p, guard.suggest(p, bashCwd))]));
 
-			return [...typos, ...scripts];
+			return [...typos, ...homeHints, ...scripts];
 		}
 
 		if (!event.isError || !NOT_FOUND.test(text.slice(0, 500))) return [];

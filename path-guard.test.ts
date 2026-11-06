@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 
 import * as z from "@oh-my-pi/omptype/zod";
 
@@ -351,6 +351,44 @@ describe("bash: GitHub owner typo", () => {
 		const home = "ls /home/joshuawarren/src && gh api repos/joshuaswarren/blend";
 		expect(result("bash", { command: home }, "gh: Not Found (HTTP 404)", true)).toBeUndefined();
 		expect(result("bash", { command: "gh repo view joshuawarren/blend" }, "blend\tprivate", false)).toBeUndefined();
+	});
+});
+
+describe("bash: home directory typo", () => {
+	const home = homedir();
+	const typo = join(dirname(home), `${basename(home).slice(0, 3)}os${basename(home).slice(3)}`);
+
+	const failed = (input: Input) => {
+		const { call, result, lastText } = load();
+		expect(call("bash", input)).toBeUndefined();
+
+		return lastText(result("bash", input, "No such file or directory", true));
+	};
+
+	test("a failed command with a misspelled home in its path or cwd names the real home, and nothing is rewritten", () => {
+		expect(failed({ command: `tail -5 ${typo}/.remnic/logs/daemon.log` })).toContain(`'${typo}' does not exist; the home directory is '${home}'`);
+		expect(failed({ command: "make", cwd: `${typo}/src` })).toContain(`the home directory is '${home}'`);
+	});
+
+	test("the real home, other users, longer names and successful commands get no hint", () => {
+		expect(failed({ command: `ls ${home}/src` })).not.toContain("home directory is");
+		expect(failed({ command: `ls ${join(dirname(home), "alice")}` })).not.toContain("home directory is");
+		expect(failed({ command: `ls ${home}extra-long-suffix/x /var${home}x ${home}x+backup/y` })).not.toContain("home directory is");
+		const { result } = load();
+		expect(result("bash", { command: `ls ${typo}` }, "ok", false)).toBeUndefined();
+	});
+
+	test("quoted text, heredocs, comments and remote commands get no hint", () => {
+		for (const command of [
+			`agent-note mistake "Used ${typo} instead of ${home}"`,
+			`printf '%s\\n' '${typo}/file'`,
+			`cat > f <<'EOF'\n${typo}/x\nEOF`,
+			`ls  # ${typo}`,
+			`ssh host ls ${typo}/x`,
+			`scp f host:${typo}/x`,
+		]) {
+			expect(failed({ command })).not.toContain("home directory is");
+		}
 	});
 });
 

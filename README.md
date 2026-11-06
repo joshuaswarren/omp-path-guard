@@ -33,10 +33,10 @@ the missing name, and tracked files with the same name. It does the same for a
 `bash` command that fails to open a script (`can't open file`,
 `Could not open input file`, `No such file or directory`).
 
-Two related dead ends get the same treatment:
+Three related dead ends get a hint in the failed result:
 
 - **find timeout**: when `find` times out before its judge verified a hit, the
-  extension runs a 4-second literal search (`rg`, or `grep` where `rg` is not
+  extension runs an 8-second literal search (`rg`, or `grep` where `rg` is not
   installed) for the query's words in the same scope. It lists the files with
   the most matches, or the matching lines when the scope is one file. A search
   that is killed or errors adds nothing.
@@ -44,6 +44,14 @@ Two related dead ends get the same treatment:
   on GitHub gets a 404, the result names the real owner `joshuaswarren/<repo>`.
   The `Joshuawarren` account belongs to someone else, so the 404 is the typo,
   not an outage.
+- **home directory typo**: when a `bash` command fails and an unquoted path in
+  it, or its `cwd`, names a home directory one or two letters away from the
+  real one (`/home/jososhuawarren` for `/home/joshuawarren`) that does not
+  exist, the result names the real home. The command is never rewritten: a
+  corrected write target could change a file the command did not reach.
+  Quoted text, heredoc bodies and comments are data (for example a note that
+  quotes the typo), and `ssh`, `scp`, `rsync` and `sftp` commands name another
+  machine's paths, so they get no hint.
 
 Every handler fails open. An internal error never blocks or changes a call.
 
