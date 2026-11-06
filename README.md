@@ -24,6 +24,11 @@ is provable:
   repository.
 - **typo**: one misspelled directory name is the only way the rest of the path
   exists.
+- **bash home typo**: a command or `cwd` that names a home directory one or
+  two letters away from the real one (`/home/jososhuawarren` for
+  `/home/joshuawarren`), where that directory does not exist, uses the real
+  home. The misspelled path could not work, so nothing that would have run
+  changes.
 
 The tool result then starts with one line that names the path it used.
 

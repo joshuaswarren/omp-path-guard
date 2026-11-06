@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 
 import * as z from "@oh-my-pi/omptype/zod";
 
@@ -351,6 +351,25 @@ describe("bash: GitHub owner typo", () => {
 		const home = "ls /home/joshuawarren/src && gh api repos/joshuaswarren/blend";
 		expect(result("bash", { command: home }, "gh: Not Found (HTTP 404)", true)).toBeUndefined();
 		expect(result("bash", { command: "gh repo view joshuawarren/blend" }, "blend\tprivate", false)).toBeUndefined();
+	});
+});
+
+describe("bash: home directory typo", () => {
+	const home = homedir();
+	const typo = join(dirname(home), `${basename(home).slice(0, 3)}os${basename(home).slice(3)}`);
+
+	test("a misspelled home directory in a command or cwd is replaced by the real home", () => {
+		const { call, result } = load();
+		const out = call("bash", { command: `tail -5 ${typo}/.remnic/logs/daemon.log`, cwd: `${typo}/src`, timeout: 30 });
+		expect(out).toEqual({ input: { command: `tail -5 ${home}/.remnic/logs/daemon.log`, cwd: `${home}/src`, timeout: 30 } });
+		expect(result("bash", {}, "ok", false, "c1")?.content[0].text).toContain(`'${typo}' does not exist; used '${home}'`);
+	});
+
+	test("the real home, other users and longer names are left alone", () => {
+		const { call } = load();
+		expect(call("bash", { command: `ls ${home}/src` })).toBeUndefined();
+		expect(call("bash", { command: `ls ${join(dirname(home), "alice")}` })).toBeUndefined();
+		expect(call("bash", { command: `ls ${home}extra-long-suffix/x /var${home}x` })).toBeUndefined();
 	});
 });
 

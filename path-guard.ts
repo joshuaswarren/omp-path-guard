@@ -105,6 +105,7 @@ const STOPWORDS = new Set(["that", "this", "with", "from", "into", "where", "whi
 /** A GitHub owner slug one letter short of `joshuaswarren`; the real `Joshuawarren` account is someone else's. */
 const OWNER_TYPO = /(?:github\.com[:/]|\brepos\/|(?:^|\s)(?:-R|--repo)(?:\s+|=)['"]?|\bgh\s+repo\s+\w+\s+['"]?)joshuawarren\/([\w.-]+)/gi;
 const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repository not found/i;
+const MAX_HOME_EDITS = 2;
 
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
@@ -630,6 +631,35 @@ export function ownerTypoHints(command: string): string[] {
 	);
 }
 
+export interface HomeFix {
+	text: string;
+	/** The misspelled home directories that were replaced. */
+	typos: string[];
+}
+
+/**
+ * Replace `<home parent>/<name>` where `name` is one or two edits from the user name and that directory
+ * does not exist (`/home/jososhuawarren` for `/home/joshuawarren`). The misspelled path cannot work, so
+ * the rewrite cannot break a command that would have run.
+ */
+export function fixHomeTypos(text: string, home = homedir()): HomeFix {
+	const parent = dirname(home);
+	const user = basename(home);
+
+	if (parent === "/" || text === "") return { text, typos: [] };
+	const escaped = parent.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	const typos = new Set<string>();
+
+	const fixed = text.replace(new RegExp(`(?<![\\w.~-])${escaped}/([\\w.-]+)`, "g"), (whole, name: string) => {
+		if (name === user || editDistance(name, user) > MAX_HOME_EDITS || existsSync(join(parent, name))) return whole;
+		typos.add(join(parent, name));
+
+		return home;
+	});
+
+	return { text: fixed, typos: [...typos] };
+}
+
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const z = pi.zod;
 	const guard = new PathGuard(config ?? loadConfig(z));
@@ -676,6 +706,26 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		return { input: parsed.data, base, sel };
 	};
 
+	const BashCall = z.object({ command: z.string(), cwd: z.string().optional() }).passthrough();
+
+	const onBashCall = (event: ToolEvent) => {
+		const parsed = BashCall.safeParse(event.input);
+
+		if (!parsed.success) return undefined;
+		const command = fixHomeTypos(parsed.data.command);
+		const cwd = fixHomeTypos(parsed.data.cwd ?? "");
+		const typos = [...new Set([...command.typos, ...cwd.typos])];
+
+		if (typos.length === 0) return undefined;
+		note(event.toolCallId, typos.map(t => `[path-guard] '${t}' does not exist; used '${homedir()}' (home directory typo).`));
+
+		const input = { ...parsed.data, command: command.text };
+
+		if (input.cwd !== undefined) input.cwd = cwd.text;
+
+		return { input };
+	};
+
 	const onEditCall = (event: ToolEvent, cwd: string) => {
 		const parsed = EditInput.safeParse(event.input);
 
@@ -693,6 +743,8 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			gitDeadline = Date.now() + HANDLER_BUDGET_MS;
 
 			if (event.toolName === "edit") return onEditCall(event, ctx.cwd);
+
+			if (event.toolName === "bash") return onBashCall(event);
 
 			if (!PATH_TOOLS.has(event.toolName)) return undefined;
 			const target = pathOf(event, ctx.cwd);
