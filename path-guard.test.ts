@@ -312,6 +312,21 @@ describe("find: judge timeout", () => {
 			rmSync(bin, { recursive: true, force: true });
 		}
 	});
+
+	test("a search that errors after some matches adds nothing", () => {
+		const bin = mkdtempSync(join(tmpdir(), "rg-err-"));
+		writeFileSync(join(bin, "rg"), `#!/bin/sh\necho "${join(tree, "lease.md")}:3"\nexit 2\n`);
+		chmodSync(join(bin, "rg"), 0o755);
+		const savedPath = process.env.PATH;
+		process.env.PATH = `${bin}:${savedPath}`;
+
+		try {
+			expect(lexicalMatches(tree, ["lease"])).toBeUndefined();
+		} finally {
+			process.env.PATH = savedPath;
+			rmSync(bin, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("bash: GitHub owner typo", () => {

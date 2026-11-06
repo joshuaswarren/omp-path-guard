@@ -549,8 +549,8 @@ function stdoutOf(cmd: string, args: string[]): string | null | undefined {
 
 		if (r.error || r.signal) return undefined;
 
-		// Exit 1 is "no match"; exit 2 is an error, so only its matches count, never its silence.
-		return (r.status ?? 2) > 1 && r.stdout.trim() === "" ? undefined : r.stdout;
+		// Exit 1 is "no match"; exit 2 is an error, and a partial ranking would mislead.
+		return (r.status ?? 2) > 1 ? undefined : r.stdout;
 	} catch {
 		return undefined;
 	}
@@ -626,7 +626,7 @@ export function ownerTypoHints(command: string): string[] {
 
 	return [...repos].map(
 		repo =>
-			`[path-guard] 'joshuawarren/${repo}' names the wrong GitHub owner. This fleet's repositories live under 'joshuaswarren' (with an s): use 'joshuaswarren/${repo}'. This 404 is the typo, not a GitHub outage.`,
+			`[path-guard] 'joshuawarren/${repo}' names the wrong GitHub owner. This fleet's repositories live under 'joshuaswarren' (with an s): use 'joshuaswarren/${repo}'. A GitHub 404 for that slug is the typo, not a GitHub outage.`,
 	);
 }
 
