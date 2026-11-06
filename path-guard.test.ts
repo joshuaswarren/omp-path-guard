@@ -327,6 +327,14 @@ describe("find: judge timeout", () => {
 			rmSync(bin, { recursive: true, force: true });
 		}
 	});
+
+	test("a find on a missing path still gets the closest real paths", () => {
+		const { result, lastText } = load();
+		const guess = join(docs, "packet/STATUS.md");
+		expect(lastText(result("find", { query: "status", grep_keywords: [], path: guess }, `Path not found: ${guess}`, true))).toContain(
+			join(docs, "packet/STATUS.json"),
+		);
+	});
 });
 
 describe("bash: GitHub owner typo", () => {

@@ -648,11 +648,11 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const BashInput = z.object({ cwd: z.string().optional(), command: z.string().optional() });
 	const FindInput = z.object({ query: z.string(), grep_keywords: z.array(z.string()).optional(), path: z.string().optional() });
 
-	/** The lexical answer to a find whose judge ran out of time; a URL scope or a killed search adds nothing. */
-	const findFallback = (event: ToolResultEvent, cwd: string, text: string): string[] => {
+	/** The lexical answer to a timed-out find; a URL scope or a killed search adds nothing. */
+	const findFallback = (event: ToolResultEvent, cwd: string): string[] => {
 		const parsed = FindInput.safeParse(event.input);
 
-		if (!event.isError || !FIND_TIMED_OUT.test(text.slice(0, 500)) || !parsed.success) return [];
+		if (!event.isError || !parsed.success) return [];
 		const scope = parsed.data.path?.trim() ? parsed.data.path : cwd;
 
 		if (!isLocalPath(scope) || !existsSync(toAbs(scope, cwd))) return [];
@@ -711,7 +711,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** Suggestion blocks for the missing paths behind a failed call. */
 	const suggestionsFor = (event: ToolResultEvent, cwd: string, text: string): string[] => {
-		if (event.toolName === "find") return findFallback(event, cwd, text);
+		if (event.toolName === "find" && FIND_TIMED_OUT.test(text.slice(0, 500))) return findFallback(event, cwd);
 
 		if (event.toolName === "bash") {
 			const parsed = BashInput.safeParse(event.input);
