@@ -96,6 +96,7 @@ const BASH_MISSING = [
 ];
 
 const FIND_TIMED_OUT = /find timed out after/;
+
 // A cold whole-repository rg took over 4 s live; the find it follows already used 20 s.
 const FALLBACK_TIMEOUT_MS = 8000;
 const MAX_FALLBACK_FILES = 8;
