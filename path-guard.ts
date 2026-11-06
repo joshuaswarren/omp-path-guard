@@ -95,6 +95,17 @@ const BASH_MISSING = [
 	/^(?:\/bin\/)?(?:bash|sh|zsh): (?:line \d+: )?([^\s:'"]+): No such file or directory/gm,
 ];
 
+const FIND_TIMED_OUT = /find timed out after/;
+const FALLBACK_TIMEOUT_MS = 4000;
+const MAX_FALLBACK_FILES = 8;
+const MAX_KEYWORDS = 8;
+const QUERY_WORD = /[a-z0-9_][a-z0-9_.-]{3,}/g;
+const STOPWORDS = new Set(["that", "this", "with", "from", "into", "where", "which", "what", "when", "does", "code", "file", "files"]);
+
+/** A GitHub owner slug one letter short of `joshuaswarren`; the real `Joshuawarren` account is someone else's. */
+const OWNER_TYPO = /(?:github\.com[:/]|\brepos\/|(?:^|\s)(?:-R|--repo)(?:\s+|=)['"]?|\bgh\s+repo\s+\w+\s+['"]?)joshuawarren\/([\w.-]+)/gi;
+const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repository not found/i;
+
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
 
@@ -520,6 +531,105 @@ function formatSuggestions(missing: string, list: string[]): string {
 	].join("\n");
 }
 
+/** Literal search words for a find call: its grep_keywords first, then the longer query words. */
+export function findKeywords(query: string, extra: string[]): string[] {
+	const words = (query.toLowerCase().match(QUERY_WORD) ?? []).filter(w => !STOPWORDS.has(w));
+
+	const given = extra.flatMap(k => (k.trim().length >= 3 ? [k.trim()] : []));
+
+	return [...new Set([...given, ...words])].slice(0, MAX_KEYWORDS);
+}
+
+/** A search's stdout; `null` when the program is not installed, undefined when it gave no usable answer. */
+function stdoutOf(cmd: string, args: string[]): string | null | undefined {
+	try {
+		const r = spawnSync(cmd, args, { encoding: "utf8", timeout: FALLBACK_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
+
+		if (r.error && "code" in r.error && r.error.code === "ENOENT") return null;
+
+		if (r.error || r.signal) return undefined;
+
+		// Exit 1 is "no match"; exit 2 is an error, so only its matches count, never its silence.
+		return (r.status ?? 2) > 1 && r.stdout.trim() === "" ? undefined : r.stdout;
+	} catch {
+		return undefined;
+	}
+}
+
+/** rg, or grep only where rg is not installed: a grep after an rg timeout would only be slower. */
+function search(rgArgs: string[], grepArgs: string[]): string | undefined {
+	const rg = stdoutOf("rg", rgArgs);
+
+	return (rg === null ? stdoutOf("grep", grepArgs) : rg) ?? undefined;
+}
+
+/**
+ * Files under `root` ranked by case-insensitive literal matches of `keywords`, or undefined when
+ * the search gave no answer inside the budget (a killed search proves nothing).
+ */
+export function lexicalMatches(root: string, keywords: string[]): { path: string; hits: number }[] | undefined {
+	const patterns = keywords.flatMap(k => ["-e", k]);
+
+	const out = search(
+		["--count-matches", "--with-filename", "-i", "-F", "--no-messages", "--max-filesize", "4M", ...patterns, "--", root],
+		["-rIciH", "-F", ...patterns, "--", root],
+	);
+
+	if (out === undefined) return undefined;
+
+	return out
+		.split("\n")
+		.flatMap(line => {
+			const cut = line.lastIndexOf(":");
+			const hits = Number(line.slice(cut + 1));
+
+			return cut > 0 && hits > 0 ? [{ path: line.slice(0, cut), hits }] : [];
+		})
+		.sort((a, b) => b.hits - a.hits || a.path.localeCompare(b.path))
+		.slice(0, MAX_FALLBACK_FILES);
+}
+
+/** The first matching lines of one file, as `L<n>: text`; undefined when the search gave no answer. */
+export function lexicalLines(file: string, keywords: string[]): string[] | undefined {
+	const patterns = keywords.flatMap(k => ["-e", k]);
+	const max = String(MAX_FALLBACK_FILES);
+	const out = search(["-n", "-i", "-F", "--no-messages", "--max-count", max, ...patterns, "--", file], ["-n", "-i", "-F", "-m", max, ...patterns, "--", file]);
+
+	return out?.split("\n").flatMap(line => {
+		const cut = line.indexOf(":");
+
+		return cut > 0 ? [`L${line.slice(0, cut)}: ${line.slice(cut + 1).trim().slice(0, 160)}`] : [];
+	});
+}
+
+/** `entries` are ranked files for a directory scope, or matching lines for a file scope. */
+function formatFallback(root: string, keywords: string[], entries: string[], isFile: boolean): string {
+	const words = keywords.map(k => `'${k}'`).join(", ");
+	const where = isFile ? `'${root}'` : `any file under '${root}'`;
+
+	if (entries.length === 0) {
+		return `[path-guard] find timed out, and ${where} contains none of ${words}. Use grep with another literal or a narrower path; do not repeat the same find.`;
+	}
+
+	return [
+		isFile
+			? `[path-guard] find timed out before its judge finished. Lines of '${root}' with ${words}:`
+			: `[path-guard] find timed out before its judge finished. Files under '${root}' with the most literal matches of ${words}:`,
+		...entries.map(e => `- ${e}`),
+		"Read or grep these next. They match the words, not the meaning; do not repeat the same find.",
+	].join("\n");
+}
+
+/** The real owner for each `joshuawarren/<repo>` GitHub slug in a command. */
+export function ownerTypoHints(command: string): string[] {
+	const repos = new Set([...command.matchAll(OWNER_TYPO)].map(m => m[1]));
+
+	return [...repos].map(
+		repo =>
+			`[path-guard] 'joshuawarren/${repo}' names the wrong GitHub owner. This fleet's repositories live under 'joshuaswarren' (with an s): use 'joshuaswarren/${repo}'. This 404 is the typo, not a GitHub outage.`,
+	);
+}
+
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const z = pi.zod;
 	const guard = new PathGuard(config ?? loadConfig(z));
@@ -535,7 +645,26 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	const PathInput = z.object({ path: z.string() }).passthrough();
 	const EditInput = z.object({ input: z.string() }).passthrough();
-	const BashInput = z.object({ cwd: z.string().optional() });
+	const BashInput = z.object({ cwd: z.string().optional(), command: z.string().optional() });
+	const FindInput = z.object({ query: z.string(), grep_keywords: z.array(z.string()).optional(), path: z.string().optional() });
+
+	/** The lexical answer to a find whose judge ran out of time; a URL scope or a killed search adds nothing. */
+	const findFallback = (event: ToolResultEvent, cwd: string, text: string): string[] => {
+		const parsed = FindInput.safeParse(event.input);
+
+		if (!event.isError || !FIND_TIMED_OUT.test(text.slice(0, 500)) || !parsed.success) return [];
+		const scope = parsed.data.path?.trim() ? parsed.data.path : cwd;
+
+		if (!isLocalPath(scope) || !existsSync(toAbs(scope, cwd))) return [];
+		const root = toAbs(scope, cwd);
+		const keywords = findKeywords(parsed.data.query, parsed.data.grep_keywords ?? []);
+
+		if (keywords.length === 0) return [];
+		const isFile = !isDir(root);
+		const entries = isFile ? lexicalLines(root, keywords) : lexicalMatches(root, keywords)?.map(m => `${m.path} (${m.hits})`);
+
+		return entries ? [formatFallback(root, keywords, entries, isFile)] : [];
+	};
 
 	/** The local path a path tool targets, without a read selector. */
 	const pathOf = (event: ToolEvent, cwd: string) => {
@@ -582,19 +711,25 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** Suggestion blocks for the missing paths behind a failed call. */
 	const suggestionsFor = (event: ToolResultEvent, cwd: string, text: string): string[] => {
+		if (event.toolName === "find") return findFallback(event, cwd, text);
+
 		if (event.toolName === "bash") {
-			if (!event.isError) return [];
 			const parsed = BashInput.safeParse(event.input);
+			const typos = parsed.success && GH_NOT_FOUND.test(text) ? ownerTypoHints(parsed.data.command ?? "") : [];
+
+			if (!event.isError) return typos;
 			const bashCwd = parsed.success && parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
 			const missing = new Set<string>();
 
 			for (const re of BASH_MISSING) for (const m of text.matchAll(re)) missing.add(m[1]);
 
 			// A bare word (`python3`) is a missing program, not a script path.
-			return [...missing]
+			const scripts = [...missing]
 				.filter(p => p.includes("/") || p.includes("."))
 				.slice(0, 2)
 				.flatMap(p => (existsSync(toAbs(p, bashCwd)) ? [] : [formatSuggestions(p, guard.suggest(p, bashCwd))]));
+
+			return [...typos, ...scripts];
 		}
 
 		if (!event.isError || !NOT_FOUND.test(text.slice(0, 500))) return [];

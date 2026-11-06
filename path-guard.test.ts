@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 
 import * as z from "@oh-my-pi/omptype/zod";
 
-import pathGuard, { type Api, type CallHandler, type ResultHandler, type ResultOutcome } from "./path-guard";
+import pathGuard, { type Api, type CallHandler, lexicalMatches, type ResultHandler, type ResultOutcome } from "./path-guard";
 
 /** Tool input as the tests write it: some fields deliberately malformed. */
 type Input = Record<string, string | number | string[]>;
@@ -262,6 +262,72 @@ describe("bash: missing script", () => {
 		const source = `print("can't open file '${join(code, "scripts/ai/release_train.py")}'")`;
 		expect(result("bash", { command: "cat x.py" }, source, false)).toBeUndefined();
 		expect(result("bash", { command: "python x" }, "env: 'python': No such file or directory", true)).toBeUndefined();
+	});
+});
+
+describe("find: judge timeout", () => {
+	const TIMEOUT = 'find timed out after 20.0s at "filename ranking 64/128", before any hit was verified.';
+	let tree: string;
+
+	beforeAll(() => {
+		tree = join(base, "search");
+		put(join(tree, "lease.md"), "quiet lease\nthe lease holder\nlease expiry\n");
+		put(join(tree, "notes/queue.md"), "one lease line\n");
+		put(join(tree, "other.md"), "nothing relevant\n");
+	});
+
+	test("a timed-out find lists the files that hold its words, most matches first", () => {
+		const { result, lastText } = load();
+		const text = lastText(result("find", { query: "where the lease is released", grep_keywords: [], path: tree }, TIMEOUT, true));
+		expect(text).toContain("lease");
+		expect(text.indexOf(join(tree, "lease.md"))).toBeGreaterThan(-1);
+		expect(text.indexOf(join(tree, "lease.md"))).toBeLessThan(text.indexOf(join(tree, "notes/queue.md")));
+		expect(text).not.toContain("other.md");
+	});
+
+	test("a find that answered, or failed for another reason, is left alone", () => {
+		const { result } = load();
+		expect(result("find", { query: "lease", grep_keywords: [], path: tree }, "1 hit(s) for lease", false)).toBeUndefined();
+		expect(result("find", { query: "lease", grep_keywords: [], path: "skill://x" }, TIMEOUT, true)).toBeUndefined();
+	});
+
+	test("a timed-out find on one file lists its matching lines", () => {
+		const { result, lastText } = load();
+		const file = join(tree, "lease.md");
+		const text = lastText(result("find", { query: "lease expiry", grep_keywords: [], path: file }, TIMEOUT, true));
+		expect(text).toContain("L3: lease expiry");
+		expect(text).toContain("L1: quiet lease");
+	});
+
+	test("without rg the same ranking comes from grep", () => {
+		const bin = mkdtempSync(join(tmpdir(), "no-rg-"));
+		symlinkSync(execFileSync("which", ["grep"], { encoding: "utf8" }).trim(), join(bin, "grep"));
+		const savedPath = process.env.PATH;
+		process.env.PATH = bin;
+
+		try {
+			expect(lexicalMatches(tree, ["lease"])?.map(m => m.path)).toEqual([join(tree, "lease.md"), join(tree, "notes/queue.md")]);
+		} finally {
+			process.env.PATH = savedPath;
+			rmSync(bin, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("bash: GitHub owner typo", () => {
+	test("a 404 for joshuawarren/<repo> names the real owner", () => {
+		const { result, lastText } = load();
+		const out = result("bash", { command: "gh api repos/joshuawarren/blend/pulls/12" }, "gh: Not Found (HTTP 404)", true);
+		expect(lastText(out)).toContain("joshuaswarren/blend");
+		const curl = result("bash", { command: "curl -s https://api.github.com/repos/Joshuawarren/remnic" }, '{"message": "Not Found"}', false);
+		expect(lastText(curl)).toContain("joshuaswarren/remnic");
+	});
+
+	test("home paths, the right owner and successful calls are left alone", () => {
+		const { result } = load();
+		const home = "ls /home/joshuawarren/src && gh api repos/joshuaswarren/blend";
+		expect(result("bash", { command: home }, "gh: Not Found (HTTP 404)", true)).toBeUndefined();
+		expect(result("bash", { command: "gh repo view joshuawarren/blend" }, "blend\tprivate", false)).toBeUndefined();
 	});
 });
 
