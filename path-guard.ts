@@ -83,6 +83,9 @@ const HANDLER_BUDGET_MS = 4000;
 const MAX_NOTICES = 100;
 const MAX_LS_FILES = 400_000;
 const NOT_FOUND = /not found|no such file|does not exist|ENOENT/i;
+const SSH_CAP = /^ssh:\/\/: (\/\S+) exceeds the 1 MiB limit/;
+const SSH_URL = /^ssh:\/\/([^/\s]+)\/.*?(?::(-\d+|\d+-\d+))?$/;
+const REMOTE_HEAD_LINES = 200;
 const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 const GLOB_CHARS = /[*?[\]{}]/;
 const READ_SELECTOR = /^(.*?)((?::(?:raw|conflicts|img|-?\d[\d+,-]*-?(?::raw)?))+)$/;
@@ -712,6 +715,22 @@ export function commandHomeTypos(command: string, home = homedir()): string[] {
 	return [...new Set(shellRuns(command).flatMap(r => (r.code ? homeTypos(r.text, home) : [])))];
 }
 
+/** A bash command that reads the asked-for part of a remote file the ssh:// reader refused as too large. */
+export function remoteReadCommand(url: string, error: string): string | undefined {
+	const file = SSH_CAP.exec(error)?.[1];
+	const parts = SSH_URL.exec(url);
+
+	if (!file || !parts) return undefined;
+	const [, host, sel] = parts;
+	const quoted = file.replace(/'/g, "'\\''");
+
+	if (sel?.startsWith("-")) return `ssh ${host} 'tail -n ${sel.slice(1)} ${quoted}'`;
+
+	if (sel) return `ssh ${host} 'sed -n ${sel.replace("-", ",")}p ${quoted}'`;
+
+	return `ssh ${host} 'head -n ${REMOTE_HEAD_LINES} ${quoted}'`;
+}
+
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const z = pi.zod;
 	const guard = new PathGuard(config ?? loadConfig(z));
@@ -818,6 +837,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 				.flatMap(p => (existsSync(toAbs(p, bashCwd)) ? [] : [formatSuggestions(p, guard.suggest(p, bashCwd))]));
 
 			return [...typos, ...homeHints, ...scripts];
+		}
+
+		if (event.toolName === "read" && event.isError) {
+			const url = PathInput.safeParse(event.input);
+			const command = url.success ? remoteReadCommand(url.data.path, text.trim()) : undefined;
+
+			if (command) return [`[path-guard] The ssh:// reader stops at 1 MiB. Read the part you need with bash: ${command}`];
 		}
 
 		if (!event.isError || !NOT_FOUND.test(text.slice(0, 500))) return [];
