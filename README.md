@@ -41,7 +41,7 @@ the missing name, and tracked files with the same name. It does the same for a
 Two related dead ends get the same treatment:
 
 - **find timeout**: when `find` times out before its judge verified a hit, the
-  extension runs a 4-second literal search (`rg`, or `grep` where `rg` is not
+  extension runs an 8-second literal search (`rg`, or `grep` where `rg` is not
   installed) for the query's words in the same scope. It lists the files with
   the most matches, or the matching lines when the scope is one file. A search
   that is killed or errors adds nothing.
