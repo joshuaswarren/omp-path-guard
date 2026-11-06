@@ -634,32 +634,25 @@ export function ownerTypoHints(command: string): string[] {
 	);
 }
 
-export interface HomeFix {
-	text: string;
-	/** The misspelled home directories that were replaced. */
-	typos: string[];
-}
-
 /**
- * Replace `<home parent>/<name>` where `name` is one or two edits from the user name and that directory
- * does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
+ * Each `<home parent>/<name>` in `text` whose whole component is one or two edits from the user name
+ * and does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
  */
-export function fixHomeTypos(text: string, home = homedir()): HomeFix {
+export function homeTypos(text: string, home = homedir()): string[] {
 	const parent = dirname(home);
 	const user = basename(home);
 
-	if (parent === "/" || text === "") return { text, typos: [] };
+	if (parent === "/" || text === "") return [];
 	const escaped = parent.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-	const typos = new Set<string>();
+	const names = [...text.matchAll(new RegExp(`(?<![\\w.~-])${escaped}/([^/\\s'"\`;|&()<>:]+)`, "g"))].map(m => m[1]);
 
-	const fixed = text.replace(new RegExp(`(?<![\\w.~-])${escaped}/([\\w.-]+)`, "g"), (whole, name: string) => {
-		if (name === user || editDistance(name, user) > MAX_HOME_EDITS || existsSync(join(parent, name))) return whole;
-		typos.add(join(parent, name));
-
-		return home;
-	});
-
-	return { text: fixed, typos: [...typos] };
+	return [
+		...new Set(
+			names.flatMap(name =>
+				name === user || editDistance(name, user) > MAX_HOME_EDITS || existsSync(join(parent, name)) ? [] : [join(parent, name)],
+			),
+		),
+	];
 }
 
 interface ShellRun {
@@ -711,13 +704,12 @@ export function shellRuns(command: string): ShellRun[] {
 
 /**
  * Home typos in the unquoted part of a local command. Quoted text may be data (an agent-note about the
- * typo), and a remote command's paths belong to another machine, so both stay as written.
+ * typo), and a remote command's paths belong to another machine, so neither counts.
  */
-export function fixCommandHomeTypos(command: string, home = homedir()): HomeFix {
-	if (REMOTE_COMMAND.test(command)) return { text: command, typos: [] };
-	const runs = shellRuns(command).map(r => (r.code ? fixHomeTypos(r.text, home) : { text: r.text, typos: [] }));
+export function commandHomeTypos(command: string, home = homedir()): string[] {
+	if (REMOTE_COMMAND.test(command)) return [];
 
-	return { text: runs.map(r => r.text).join(""), typos: [...new Set(runs.flatMap(r => r.typos))] };
+	return [...new Set(shellRuns(command).flatMap(r => (r.code ? homeTypos(r.text, home) : [])))];
 }
 
 export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
@@ -766,26 +758,6 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		return { input: parsed.data, base, sel };
 	};
 
-	const BashCall = z.object({ command: z.string(), cwd: z.string().optional() }).passthrough();
-
-	const onBashCall = (event: ToolEvent) => {
-		const parsed = BashCall.safeParse(event.input);
-
-		if (!parsed.success) return undefined;
-		const command = fixCommandHomeTypos(parsed.data.command);
-		const cwd = fixHomeTypos(parsed.data.cwd ?? "");
-		const typos = [...new Set([...command.typos, ...cwd.typos])];
-
-		if (typos.length === 0) return undefined;
-		note(event.toolCallId, typos.map(t => `[path-guard] '${t}' does not exist; used '${homedir()}' (home directory typo).`));
-
-		const input = { ...parsed.data, command: command.text };
-
-		if (input.cwd !== undefined) input.cwd = cwd.text;
-
-		return { input };
-	};
-
 	const onEditCall = (event: ToolEvent, cwd: string) => {
 		const parsed = EditInput.safeParse(event.input);
 
@@ -803,8 +775,6 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			gitDeadline = Date.now() + HANDLER_BUDGET_MS;
 
 			if (event.toolName === "edit") return onEditCall(event, ctx.cwd);
-
-			if (event.toolName === "bash") return onBashCall(event);
 
 			if (!PATH_TOOLS.has(event.toolName)) return undefined;
 			const target = pathOf(event, ctx.cwd);
@@ -831,6 +801,12 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (!event.isError) return typos;
 			const bashCwd = parsed.success && parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
+			const homes = parsed.success ? [...commandHomeTypos(parsed.data.command ?? ""), ...homeTypos(parsed.data.cwd ?? "")] : [];
+
+			const homeHints = [...new Set(homes)].map(
+				t => `[path-guard] '${t}' does not exist; the home directory is '${homedir()}'. Retry with that path.`,
+			);
+
 			const missing = new Set<string>();
 
 			for (const re of BASH_MISSING) for (const m of text.matchAll(re)) missing.add(m[1]);
@@ -841,7 +817,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 				.slice(0, 2)
 				.flatMap(p => (existsSync(toAbs(p, bashCwd)) ? [] : [formatSuggestions(p, guard.suggest(p, bashCwd))]));
 
-			return [...typos, ...scripts];
+			return [...typos, ...homeHints, ...scripts];
 		}
 
 		if (!event.isError || !NOT_FOUND.test(text.slice(0, 500))) return [];

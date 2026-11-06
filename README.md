@@ -24,12 +24,6 @@ is provable:
   repository.
 - **typo**: one misspelled directory name is the only way the rest of the path
   exists.
-- **bash home typo**: an unquoted path in a command, or the `cwd`, that names
-  a home directory one or two letters away from the real one
-  (`/home/jososhuawarren` for `/home/joshuawarren`), where that directory does
-  not exist, uses the real home. Quoted text, heredoc bodies and comments are
-  data (for example a note that quotes the typo), and `ssh`, `scp`, `rsync`
-  and `sftp` commands name another machine's paths, so those stay as written.
 
 The tool result then starts with one line that names the path it used.
 
@@ -50,6 +44,14 @@ Two related dead ends get the same treatment:
   on GitHub gets a 404, the result names the real owner `joshuaswarren/<repo>`.
   The `Joshuawarren` account belongs to someone else, so the 404 is the typo,
   not an outage.
+- **home directory typo**: when a `bash` command fails and an unquoted path in
+  it, or its `cwd`, names a home directory one or two letters away from the
+  real one (`/home/jososhuawarren` for `/home/joshuawarren`) that does not
+  exist, the result names the real home. The command is never rewritten: a
+  corrected write target could change a file the command did not reach.
+  Quoted text, heredoc bodies and comments are data (for example a note that
+  quotes the typo), and `ssh`, `scp`, `rsync` and `sftp` commands name another
+  machine's paths, so they get no hint.
 
 Every handler fails open. An internal error never blocks or changes a call.
 

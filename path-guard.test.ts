@@ -358,34 +358,37 @@ describe("bash: home directory typo", () => {
 	const home = homedir();
 	const typo = join(dirname(home), `${basename(home).slice(0, 3)}os${basename(home).slice(3)}`);
 
-	test("a misspelled home directory in a command or cwd is replaced by the real home", () => {
-		const { call, result } = load();
-		const out = call("bash", { command: `tail -5 ${typo}/.remnic/logs/daemon.log`, cwd: `${typo}/src`, timeout: 30 });
-		expect(out).toEqual({ input: { command: `tail -5 ${home}/.remnic/logs/daemon.log`, cwd: `${home}/src`, timeout: 30 } });
-		expect(result("bash", {}, "ok", false, "c1")?.content[0].text).toContain(`'${typo}' does not exist; used '${home}'`);
+	const failed = (input: Input) => {
+		const { call, result, lastText } = load();
+		expect(call("bash", input)).toBeUndefined();
+
+		return lastText(result("bash", input, "No such file or directory", true));
+	};
+
+	test("a failed command with a misspelled home in its path or cwd names the real home, and nothing is rewritten", () => {
+		expect(failed({ command: `tail -5 ${typo}/.remnic/logs/daemon.log` })).toContain(`'${typo}' does not exist; the home directory is '${home}'`);
+		expect(failed({ command: "make", cwd: `${typo}/src` })).toContain(`the home directory is '${home}'`);
 	});
 
-	test("the real home, other users and longer names are left alone", () => {
-		const { call } = load();
-		expect(call("bash", { command: `ls ${home}/src` })).toBeUndefined();
-		expect(call("bash", { command: `ls ${join(dirname(home), "alice")}` })).toBeUndefined();
-		expect(call("bash", { command: `ls ${home}extra-long-suffix/x /var${home}x` })).toBeUndefined();
+	test("the real home, other users, longer names and successful commands get no hint", () => {
+		expect(failed({ command: `ls ${home}/src` })).not.toContain("home directory is");
+		expect(failed({ command: `ls ${join(dirname(home), "alice")}` })).not.toContain("home directory is");
+		expect(failed({ command: `ls ${home}extra-long-suffix/x /var${home}x ${home}x+backup/y` })).not.toContain("home directory is");
+		const { result } = load();
+		expect(result("bash", { command: `ls ${typo}` }, "ok", false)).toBeUndefined();
 	});
 
-	test("quoted text, heredocs, comments and remote commands stay as written", () => {
-		const { call } = load();
-		expect(call("bash", { command: `agent-note mistake "Used ${typo} instead of ${home}"` })).toBeUndefined();
-		expect(call("bash", { command: `printf '%s\\n' '${typo}/file'` })).toBeUndefined();
-		expect(call("bash", { command: `cat > f <<'EOF'\n${typo}/x\nEOF` })).toBeUndefined();
-		expect(call("bash", { command: `ls  # ${typo}` })).toBeUndefined();
-		expect(call("bash", { command: `ssh host ls ${typo}/x` })).toBeUndefined();
-		expect(call("bash", { command: `scp f host:${typo}/x` })).toBeUndefined();
-	});
-
-	test("an unquoted typo beside quoted data is still fixed, and the data is kept", () => {
-		const { call } = load();
-		const out = call("bash", { command: `grep "${typo}" ${typo}/log` });
-		expect(out).toEqual({ input: { command: `grep "${typo}" ${home}/log` } });
+	test("quoted text, heredocs, comments and remote commands get no hint", () => {
+		for (const command of [
+			`agent-note mistake "Used ${typo} instead of ${home}"`,
+			`printf '%s\\n' '${typo}/file'`,
+			`cat > f <<'EOF'\n${typo}/x\nEOF`,
+			`ls  # ${typo}`,
+			`ssh host ls ${typo}/x`,
+			`scp f host:${typo}/x`,
+		]) {
+			expect(failed({ command })).not.toContain("home directory is");
+		}
 	});
 });
 
