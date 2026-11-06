@@ -33,7 +33,7 @@ the missing name, and tracked files with the same name. It does the same for a
 `bash` command that fails to open a script (`can't open file`,
 `Could not open input file`, `No such file or directory`).
 
-Two related dead ends get the same treatment:
+Three related dead ends get a hint in the failed result:
 
 - **find timeout**: when `find` times out before its judge verified a hit, the
   extension runs an 8-second literal search (`rg`, or `grep` where `rg` is not
