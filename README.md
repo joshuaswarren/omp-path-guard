@@ -33,6 +33,18 @@ the missing name, and tracked files with the same name. It does the same for a
 `bash` command that fails to open a script (`can't open file`,
 `Could not open input file`, `No such file or directory`).
 
+Two related dead ends get the same treatment:
+
+- **find timeout**: when `find` times out before its judge verified a hit, the
+  extension runs a 4-second literal search (`rg`, or `grep` where `rg` is not
+  installed) for the query's words in the same scope. It lists the files with
+  the most matches, or the matching lines when the scope is one file. A search
+  that is killed or errors adds nothing.
+- **GitHub owner typo**: when a `bash` command that names `joshuawarren/<repo>`
+  on GitHub gets a 404, the result names the real owner `joshuaswarren/<repo>`.
+  The `Joshuawarren` account belongs to someone else, so the 404 is the typo,
+  not an outage.
+
 Every handler fails open. An internal error never blocks or changes a call.
 
 ## Install
