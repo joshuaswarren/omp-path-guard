@@ -127,8 +127,10 @@ const MERGE_REBASE = /(?:^|\s)(?:--rebase|-r)(?=\s|$)/;
 const GRAPHQL_HOLD_MS = 10 * 60_000;
 const HERDR_LIST = /\bherdr\s+agent\s+list\b/;
 const JQ_ROOT_ERROR = /jq: error \(at <stdin>:\d+\): Cannot (?:index|iterate over)/;
+
 const HERDR_LIST_FORMAT =
 	'`herdr agent list` already prints JSON, wrapped as {"id": "cli:agent:list", "result": {"agents": [...]}}. Filter with `.result.agents[]`; each agent has pane_id, name, agent_status and cwd.';
+
 const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 
 // Shared leading characters that make "same commit" certain; below 8 a remote-only commit could collide.
