@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 
 import * as z from "@oh-my-pi/omptype/zod";
 
-import pathGuard, { type Api, type CallHandler, lexicalMatches, type ResultHandler, type ResultOutcome } from "./path-guard";
+import pathGuard, { type Api, type CallHandler, lexicalMatches, type ResultHandler, type ResultOutcome, restFallback } from "./path-guard";
 
 /** Tool input as the tests write it: some fields deliberately malformed. */
 type Input = Record<string, string | number | string[]>;
@@ -375,6 +375,16 @@ describe("bash: GitHub GraphQL budget spent", () => {
 		expect(call("bash", { command: "gh pr view 5031" })).toBeUndefined();
 		result("bash", { command: "gh pr checks 1" }, limit, true);
 		expect(call("bash", { command: "gh api repos/joshuaswarren/blend/pulls/1" })).toBeUndefined();
+		expect(call("bash", { command: 'echo "gh pr view 5031"' })).toBeUndefined();
+	});
+
+	test("the REST form reads its own command's PR number, repository and merge method", () => {
+		expect(restFallback("gh pr checks --repo org/repo 5030")).toContain("repos/org/repo/pulls/5030");
+		expect(restFallback("gh pr checks --interval 10 5004 --watch")).toContain("pulls/5004 ");
+		expect(restFallback("gh pr view https://github.com/org/repo/pull/7")).toBe("gh api repos/{owner}/{repo}/pulls/7");
+		expect(restFallback("gh pr merge 5030 --delete-branch")).toContain("merge_method=merge ");
+		expect(restFallback("gh pr merge 5030 -R org/repo --squash")).toContain("repos/org/repo/pulls/5030/merge -f merge_method=squash");
+		expect(restFallback("gh pr view 5031; gh issue list -R other/repo")).toBe("gh api repos/{owner}/{repo}/pulls/5031");
 	});
 });
 

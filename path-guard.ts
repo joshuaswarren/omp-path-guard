@@ -115,9 +115,13 @@ const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repos
 const REMOTE_COMMAND = /(?:^|[\s;&|(])(?:ssh|scp|rsync|sftp)(?:\s|$)/;
 const MAX_HOME_EDITS = 2;
 const GRAPHQL_LIMIT = /GraphQL: API rate limit (?:already )?exceeded/i;
-const GH_PR = /\bgh\s+pr\s+(checks|view|list|status|merge)\b/;
-const GH_PR_NUMBER = /\bgh\s+pr\s+\w+\s+(\d+)\b/;
+
+// One gh pr command: its subcommand, then its arguments up to the next shell separator.
+const GH_PR = /\bgh\s+pr\s+(checks|view|list|status|merge)\b([^;&|\n]*)/;
+const GH_PR_NUMBER = /(?:^|\s)(?<!(?:--interval|-i|--limit|-L)\s+)['"]?(?:https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/)?(\d+)['"]?(?=\s|$)/;
 const GH_REPO_FLAG = /(?:^|\s)(?:-R|--repo)(?:\s+|=)['"]?([\w.-]+\/[\w.-]+)/;
+const MERGE_SQUASH = /(?:^|\s)(?:--squash|-s)(?=\s|$)/;
+const MERGE_REBASE = /(?:^|\s)(?:--rebase|-r)(?=\s|$)/;
 
 // GitHub refills the GraphQL budget hourly; inside this window a gh pr retry fails the same way.
 const GRAPHQL_HOLD_MS = 10 * 60_000;
@@ -653,11 +657,12 @@ export function ownerTypoHints(command: string): string[] {
 
 /** The REST (`gh api`) form of a GraphQL-backed `gh pr` command; REST has a separate budget. */
 export function restFallback(command: string): string | undefined {
-	const sub = GH_PR.exec(command)?.[1];
+	const m = GH_PR.exec(command);
 
-	if (!sub) return undefined;
-	const repo = `repos/${GH_REPO_FLAG.exec(command)?.[1] ?? "{owner}/{repo}"}`;
-	const pr = `${repo}/pulls/${GH_PR_NUMBER.exec(command)?.[1] ?? "<number>"}`;
+	if (!m) return undefined;
+	const [, sub, args] = m;
+	const repo = `repos/${GH_REPO_FLAG.exec(args)?.[1] ?? "{owner}/{repo}"}`;
+	const pr = `${repo}/pulls/${GH_PR_NUMBER.exec(args)?.[1] ?? "<number>"}`;
 
 	switch (sub) {
 		case "checks":
@@ -665,7 +670,7 @@ export function restFallback(command: string): string | undefined {
 		case "view":
 			return `gh api ${pr}`;
 		case "merge": {
-			const method = /--squash|-s\b/.test(command) ? "squash" : /--rebase|-r\b/.test(command) ? "rebase" : "merge";
+			const method = MERGE_SQUASH.test(args) ? "squash" : MERGE_REBASE.test(args) ? "rebase" : "merge";
 
 			return `gh api -X PUT ${pr}/merge -f merge_method=${method} -f sha=<full head SHA from gh api ${pr} --jq .head.sha>`;
 		}
@@ -872,7 +877,10 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 		if (!parsed.success || !parsed.data.command) return undefined;
 		const command = parsed.data.command;
-		const rest = Date.now() - graphqlSpentAt < GRAPHQL_HOLD_MS ? restFallback(command) : undefined;
+		// Quoted text (an echo, a note) names gh pr without running it.
+		const runs = shellRuns(command).flatMap(r => (r.code ? [r.text] : []));
+		const held = Date.now() - graphqlSpentAt < GRAPHQL_HOLD_MS && GH_PR.test(runs.join(" "));
+		const rest = held ? restFallback(command) : undefined;
 
 		if (rest) {
 			return {
