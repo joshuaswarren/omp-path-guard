@@ -33,7 +33,7 @@ the missing name, and tracked files with the same name. It does the same for a
 `bash` command that fails to open a script (`can't open file`,
 `Could not open input file`, `No such file or directory`).
 
-Four related dead ends get a hint in the failed result:
+Five related dead ends get a hint in the failed result:
 
 - **find timeout**: when `find` times out before its judge verified a hit, the
   extension runs an 8-second literal search (`rg`, or `grep` where `rg` is not
@@ -56,6 +56,11 @@ Four related dead ends get a hint in the failed result:
   the result gives a `bash` command that reads only the asked-for part:
   `tail -n N` for a `:-N` selector, `sed -n A,Bp` for `:A-B`, otherwise
   `head -n 200`.
+- **herdr agent list**: when a `bash` command runs `herdr agents` (unknown
+  command), `herdr agent list --json` (no such flag), or pipes
+  `herdr agent list` into a `jq` filter that fails on the JSON root, the result
+  gives the real shape: `.result.agents[]`, with `pane_id`, `name`,
+  `agent_status` and `cwd`.
 
 Two calls are refused before they run:
 

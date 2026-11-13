@@ -390,6 +390,26 @@ describe("bash: GitHub GraphQL budget spent", () => {
 	});
 });
 
+describe("bash: herdr agent list shape", () => {
+	test("a guessed subcommand, flag or JSON root gets the real command and shape", () => {
+		const { result, lastText } = load();
+		const unknown = result("bash", { command: "herdr agents --json" }, "unknown command: agents\nrun 'herdr --help' for usage", false);
+		expect(lastText(unknown)).toContain(".result.agents[]");
+		const flag = result("bash", { command: "herdr agent list --json" }, "usage: herdr agent list", true);
+		expect(lastText(flag)).toContain("already prints JSON");
+		const root = 'jq: error (at <stdin>:1): Cannot index string with string "pane_id"';
+		expect(lastText(result("bash", { command: "herdr agent list | jq -r '.[] | .pane_id'" }, root, true))).toContain(".result.agents[]");
+	});
+
+	test("a right filter, other jq errors and other commands get no hint", () => {
+		const { result } = load();
+		const root = 'jq: error (at <stdin>:1): Cannot index string with string "pane"';
+		expect(result("bash", { command: "herdr agent list | jq '.result.agents[] | .pane'" }, root, true)).toBeUndefined();
+		expect(result("bash", { command: "cat x.json | jq '.[] | .pane'" }, root, true)).toBeUndefined();
+		expect(result("bash", { command: "herdr agent list" }, '{"id":"cli:agent:list"}', false)).toBeUndefined();
+	});
+});
+
 describe("bash: hand-completed SHA", () => {
 	// The real SHA's first 10 characters, then 30 that differ from it.
 	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);

@@ -125,6 +125,12 @@ const MERGE_REBASE = /(?:^|\s)(?:--rebase|-r)(?=\s|$)/;
 
 // GitHub refills the GraphQL budget hourly; inside this window a gh pr retry fails the same way.
 const GRAPHQL_HOLD_MS = 10 * 60_000;
+const HERDR_LIST = /\bherdr\s+agent\s+list\b/;
+const JQ_ROOT_ERROR = /jq: error \(at <stdin>:\d+\): Cannot (?:index|iterate over)/;
+
+const HERDR_LIST_FORMAT =
+	'`herdr agent list` already prints JSON, wrapped as {"id": "cli:agent:list", "result": {"agents": [...]}}. Filter with `.result.agents[]`; each agent has pane_id, name, agent_status and cwd.';
+
 const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 
 // Shared leading characters that make "same commit" certain; below 8 a remote-only commit could collide.
@@ -655,6 +661,16 @@ export function ownerTypoHints(command: string): string[] {
 	);
 }
 
+/** The real shape of `herdr agent list` after a command that guessed its subcommand, flag or JSON root. */
+export function herdrHints(command: string, text: string): string[] {
+	const guessed =
+		(/\bherdr\s+agents\b/.test(command) && /unknown command: agents/.test(text)) ||
+		(HERDR_LIST.test(command) && /usage: herdr agent list/.test(text)) ||
+		(HERDR_LIST.test(command) && JQ_ROOT_ERROR.test(text) && !command.includes(".result.agents"));
+
+	return guessed ? [`[path-guard] ${HERDR_LIST_FORMAT}`] : [];
+}
+
 /** The REST (`gh api`) form of a GraphQL-backed `gh pr` command; REST has a separate budget. */
 export function restFallback(command: string): string | undefined {
 	const m = GH_PR.exec(command);
@@ -936,6 +952,8 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		if (event.toolName === "bash") {
 			const parsed = BashInput.safeParse(event.input);
 			const typos = parsed.success && GH_NOT_FOUND.test(text) ? ownerTypoHints(parsed.data.command ?? "") : [];
+
+			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
 
 			if (GRAPHQL_LIMIT.test(text)) {
 				graphqlSpentAt = Date.now();
