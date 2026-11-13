@@ -57,6 +57,16 @@ Four related dead ends get a hint in the failed result:
   `tail -n N` for a `:-N` selector, `sed -n A,Bp` for `:A-B`, otherwise
   `head -n 200`.
 
+One call is refused before it runs:
+
+- **hand-completed SHA**: a `bash` command holds a 40-character SHA that is
+  not a commit of the repository at its `cwd`, while the first 8 to 12
+  characters of it name a different commit there. That SHA is a known short
+  SHA with invented characters appended, so a merge guard or the GitHub API
+  would refuse it anyway. The refusal names the real full SHA. A SHA whose
+  prefix is unknown locally (a commit that exists only on a remote) runs
+  unchanged, and so does an `agent-note` command that quotes a bad SHA.
+
 Every handler fails open. An internal error never blocks or changes a call.
 
 ## Install
