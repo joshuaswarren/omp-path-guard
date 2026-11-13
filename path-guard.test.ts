@@ -385,6 +385,8 @@ describe("bash: GitHub GraphQL budget spent", () => {
 		expect(restFallback("gh pr merge 5030 --delete-branch")).toContain("merge_method=merge ");
 		expect(restFallback("gh pr merge 5030 -R org/repo --squash")).toContain("repos/org/repo/pulls/5030/merge -f merge_method=squash");
 		expect(restFallback("gh pr view 5031; gh issue list -R other/repo")).toBe("gh api repos/{owner}/{repo}/pulls/5031");
+		expect(restFallback("gh pr merge 5031 --disable-auto")).toBeUndefined();
+		expect(restFallback("gh pr merge 5031 --auto --squash")).toBeUndefined();
 	});
 });
 

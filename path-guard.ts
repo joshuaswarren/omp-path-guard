@@ -670,6 +670,8 @@ export function restFallback(command: string): string | undefined {
 		case "view":
 			return `gh api ${pr}`;
 		case "merge": {
+			// Auto-merge exists only in GraphQL; a PUT to /merge would do the opposite of --disable-auto.
+			if (/(?:^|\s)--(?:disable-)?auto(?=\s|$)/.test(args)) return undefined;
 			const method = MERGE_SQUASH.test(args) ? "squash" : MERGE_REBASE.test(args) ? "rebase" : "merge";
 
 			return `gh api -X PUT ${pr}/merge -f merge_method=${method} -f sha=<full head SHA from gh api ${pr} --jq .head.sha>`;
