@@ -12,7 +12,9 @@
 //        misspelled directory name is the only way the rest of the path exists;
 //   2. otherwise appends the closest real paths to the not-found error, so the
 //      next call can be right;
-//   3. does the same for bash commands that fail to open a script file.
+//   3. does the same for bash commands that fail to open a script file;
+//   4. refuses a bash command whose full SHA is a known short SHA completed by
+//      hand, and names the real commit.
 // Every handler fails open: an internal error never blocks or alters a call.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -42,9 +44,8 @@ export interface Ctx {
 	cwd: string;
 }
 
-export interface CallOutcome {
-	input: object;
-}
+/** A rewritten input, or a refusal whose reason the model reads instead of a result. */
+export type CallOutcome = { input: object } | { block: true; reason: string };
 
 export interface ResultOutcome {
 	content: Block[];
@@ -113,6 +114,11 @@ const OWNER_TYPO = /(?:github\.com[:/]|\brepos\/|(?:^|\s)(?:-R|--repo)(?:\s+|=)[
 const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repository not found/i;
 const REMOTE_COMMAND = /(?:^|[\s;&|(])(?:ssh|scp|rsync|sftp)(?:\s|$)/;
 const MAX_HOME_EDITS = 2;
+const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
+
+// Shared leading characters that make "same commit" certain; below 8 a remote-only commit could collide.
+const SHA_PREFIXES = [12, 10, 8];
+const NOTE_COMMAND = /(?:^|[\s;&|(/])agent-note(?:\s|$)/;
 
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
@@ -639,6 +645,37 @@ export function ownerTypoHints(command: string): string[] {
 }
 
 /**
+ * Each 40-hex SHA in `command` that is no commit of the repository at `cwd` although its first 8 to 12
+ * characters name a different commit there: a known short SHA completed with invented characters.
+ * Pairs of [invented, real]. A SHA whose prefix is unknown locally (a remote-only commit) is left alone.
+ */
+export function inventedShas(command: string, cwd: string): [string, string][] {
+	if (NOTE_COMMAND.test(command)) return [];
+	const found: [string, string][] = [];
+
+	for (const sha of new Set(command.match(FULL_SHA) ?? [])) {
+		const self = git(["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], cwd);
+
+		if (!self.answered || self.out !== undefined) continue;
+
+		for (const n of SHA_PREFIXES) {
+			const r = git(["rev-parse", "--verify", "--quiet", `${sha.slice(0, n)}^{commit}`], cwd);
+
+			if (!r.answered) break;
+			const real = r.out?.trim();
+
+			if (real) {
+				if (real !== sha) found.push([sha, real]);
+
+				break;
+			}
+		}
+	}
+
+	return found;
+}
+
+/**
  * Each `<home parent>/<name>` in `text` whose whole component is one or two edits from the user name
  * and does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
  */
@@ -792,9 +829,31 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		return { input: { ...parsed.data, input: patch } };
 	};
 
+	/** Refuse a bash command that carries a hand-completed full SHA, and name the real one. */
+	const onBashCall = (event: ToolEvent, cwd: string): CallOutcome | undefined => {
+		const parsed = BashInput.safeParse(event.input);
+
+		if (!parsed.success || !parsed.data.command) return undefined;
+		const shas = inventedShas(parsed.data.command, parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd);
+
+		if (shas.length === 0) return undefined;
+
+		return {
+			block: true,
+			reason: shas
+				.map(
+					([bad, real]) =>
+						`[path-guard] '${bad}' is not a commit in this repository, but its first characters name '${real}'. A full SHA must be copied from git rev-parse or the API (.head.sha), never completed by hand. Retry with the real SHA if that is the commit you mean.`,
+				)
+				.join("\n"),
+		};
+	};
+
 	pi.on("tool_call", (event, ctx) => {
 		try {
 			gitDeadline = Date.now() + HANDLER_BUDGET_MS;
+
+			if (event.toolName === "bash") return onBashCall(event, ctx.cwd);
 
 			if (event.toolName === "edit") return onEditCall(event, ctx.cwd);
 

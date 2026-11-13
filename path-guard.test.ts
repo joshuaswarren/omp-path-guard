@@ -67,7 +67,7 @@ function load(roots: string[] = []) {
 	const pathAfter = (toolName: string, input: Input) => {
 		const out = call(toolName, input);
 
-		return out ? z.object({ path: z.string() }).parse(out.input).path : undefined;
+		return out && "input" in out ? z.object({ path: z.string() }).parse(out.input).path : undefined;
 	};
 
 	const lastText = (out: ResultOutcome | undefined) => out?.content.at(-1)?.text ?? "";
@@ -351,6 +351,31 @@ describe("bash: GitHub owner typo", () => {
 		const home = "ls /home/joshuawarren/src && gh api repos/joshuaswarren/blend";
 		expect(result("bash", { command: home }, "gh: Not Found (HTTP 404)", true)).toBeUndefined();
 		expect(result("bash", { command: "gh repo view joshuawarren/blend" }, "blend\tprivate", false)).toBeUndefined();
+	});
+});
+
+describe("bash: hand-completed SHA", () => {
+	// The real SHA's first 10 characters, then 30 that differ from it.
+	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);
+
+	test("a full SHA built on a real short SHA is refused, and the real one is named", () => {
+		const { call } = load();
+		const real = execFileSync("git", ["-C", code, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+		const bad = invent(real);
+		const out = call("bash", { command: `gh api repos/joshuaswarren/blend/commits/${bad}/check-runs` });
+		expect(out).toMatchObject({ block: true });
+		expect(out && "reason" in out ? out.reason : "").toContain(real);
+		const merge = call("bash", { command: `gh pr merge 12 --squash --match-head-commit "${bad}"`, cwd: code });
+		expect(merge).toMatchObject({ block: true });
+	});
+
+	test("real SHAs, unknown SHAs, notes and commands outside a repository run unchanged", () => {
+		const { call } = load();
+		const real = execFileSync("git", ["-C", code, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+		expect(call("bash", { command: `gh api repos/joshuaswarren/blend/commits/${real}/check-runs` })).toBeUndefined();
+		expect(call("bash", { command: `git show ${"f".repeat(40)}` })).toBeUndefined();
+		expect(call("bash", { command: `~/.local/bin/agent-note mistake 'used ${invent(real)}'` })).toBeUndefined();
+		expect(call("bash", { command: `git show ${invent(real)}`, cwd: plain })).toBeUndefined();
 	});
 });
 
