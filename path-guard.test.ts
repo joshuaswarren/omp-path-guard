@@ -354,6 +354,30 @@ describe("bash: GitHub owner typo", () => {
 	});
 });
 
+describe("bash: GitHub GraphQL budget spent", () => {
+	const limit = "GraphQL: API rate limit already exceeded for user ID 816217.";
+
+	test("the refusal gives the REST form, and a gh pr retry in the same session is refused with it", () => {
+		const { call, result, lastText } = load();
+		const docs = "joshuaswarren/blend-adobe-commerce-docs";
+		const out = result("bash", { command: `gh pr checks 5030 --repo ${docs}` }, limit, true);
+		expect(lastText(out)).toContain(`gh api repos/${docs}/commits/$(gh api repos/${docs}/pulls/5030 --jq .head.sha)/check-runs`);
+		const retry = call("bash", { command: "gh pr view 5031" });
+		expect(retry).toMatchObject({ block: true });
+		expect(retry && "reason" in retry ? retry.reason : "").toContain("gh api repos/{owner}/{repo}/pulls/5031");
+		expect(call("bash", { command: "gh pr merge 5031 --squash" })).toMatchObject({ block: true });
+	});
+
+	test("REST calls, other errors and a session without the refusal run unchanged", () => {
+		const { call, result } = load();
+		expect(call("bash", { command: "gh pr view 5031" })).toBeUndefined();
+		expect(result("bash", { command: "gh pr view 5031" }, "GraphQL: Could not resolve to a PullRequest", true)).toBeUndefined();
+		expect(call("bash", { command: "gh pr view 5031" })).toBeUndefined();
+		result("bash", { command: "gh pr checks 1" }, limit, true);
+		expect(call("bash", { command: "gh api repos/joshuaswarren/blend/pulls/1" })).toBeUndefined();
+	});
+});
+
 describe("bash: hand-completed SHA", () => {
 	// The real SHA's first 10 characters, then 30 that differ from it.
 	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);

@@ -57,7 +57,7 @@ Four related dead ends get a hint in the failed result:
   `tail -n N` for a `:-N` selector, `sed -n A,Bp` for `:A-B`, otherwise
   `head -n 200`.
 
-One call is refused before it runs:
+Two calls are refused before they run:
 
 - **hand-completed SHA**: a `bash` command holds a 40-character SHA that is
   not a commit of the repository at its `cwd`, while the first 8 to 12
@@ -66,6 +66,11 @@ One call is refused before it runs:
   would refuse it anyway. The refusal names the real full SHA. A SHA whose
   prefix is unknown locally (a commit that exists only on a remote) runs
   unchanged, and so does an `agent-note` command that quotes a bad SHA.
+- **spent GraphQL budget**: when a `bash` result says GitHub's GraphQL rate
+  limit is exceeded, the result gives the REST (`gh api`) form of the `gh pr`
+  command (`checks`, `view`, `merge`, `list`, `status`). For the next 10
+  minutes the same session's `gh pr` commands are refused with their REST
+  form, because they use GraphQL and would fail the same way. REST calls run.
 
 Every handler fails open. An internal error never blocks or changes a call.
 

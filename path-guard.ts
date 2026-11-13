@@ -114,6 +114,13 @@ const OWNER_TYPO = /(?:github\.com[:/]|\brepos\/|(?:^|\s)(?:-R|--repo)(?:\s+|=)[
 const GH_NOT_FOUND = /Not Found|HTTP 404|Could not resolve to a Repository|Repository not found/i;
 const REMOTE_COMMAND = /(?:^|[\s;&|(])(?:ssh|scp|rsync|sftp)(?:\s|$)/;
 const MAX_HOME_EDITS = 2;
+const GRAPHQL_LIMIT = /GraphQL: API rate limit (?:already )?exceeded/i;
+const GH_PR = /\bgh\s+pr\s+(checks|view|list|status|merge)\b/;
+const GH_PR_NUMBER = /\bgh\s+pr\s+\w+\s+(\d+)\b/;
+const GH_REPO_FLAG = /(?:^|\s)(?:-R|--repo)(?:\s+|=)['"]?([\w.-]+\/[\w.-]+)/;
+
+// GitHub refills the GraphQL budget hourly; inside this window a gh pr retry fails the same way.
+const GRAPHQL_HOLD_MS = 10 * 60_000;
 const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 
 // Shared leading characters that make "same commit" certain; below 8 a remote-only commit could collide.
@@ -644,6 +651,30 @@ export function ownerTypoHints(command: string): string[] {
 	);
 }
 
+/** The REST (`gh api`) form of a GraphQL-backed `gh pr` command; REST has a separate budget. */
+export function restFallback(command: string): string | undefined {
+	const sub = GH_PR.exec(command)?.[1];
+
+	if (!sub) return undefined;
+	const repo = `repos/${GH_REPO_FLAG.exec(command)?.[1] ?? "{owner}/{repo}"}`;
+	const pr = `${repo}/pulls/${GH_PR_NUMBER.exec(command)?.[1] ?? "<number>"}`;
+
+	switch (sub) {
+		case "checks":
+			return `gh api ${repo}/commits/$(gh api ${pr} --jq .head.sha)/check-runs --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`;
+		case "view":
+			return `gh api ${pr}`;
+		case "merge": {
+			const method = /--squash|-s\b/.test(command) ? "squash" : /--rebase|-r\b/.test(command) ? "rebase" : "merge";
+
+			return `gh api -X PUT ${pr}/merge -f merge_method=${method} -f sha=<full head SHA from gh api ${pr} --jq .head.sha>`;
+		}
+
+		default:
+			return `gh api '${repo}/pulls?state=open&per_page=50' --jq '.[] | [.number, .head.ref, .title] | @tsv'`;
+	}
+}
+
 /**
  * Each 40-hex SHA in `command` that is no commit of the repository at `cwd` although its first 8 to 12
  * characters name a different commit there: a known short SHA completed with invented characters.
@@ -829,12 +860,28 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		return { input: { ...parsed.data, input: patch } };
 	};
 
-	/** Refuse a bash command that carries a hand-completed full SHA, and name the real one. */
+	/** When this session's GraphQL refusal is recent, the gh pr call it would retry. */
+	let graphqlSpentAt = Number.NEGATIVE_INFINITY;
+
+	/**
+	 * Refuse a bash command that carries a hand-completed full SHA, and name the real one; refuse a
+	 * GraphQL-backed gh pr command soon after GitHub refused GraphQL, and give its REST form.
+	 */
 	const onBashCall = (event: ToolEvent, cwd: string): CallOutcome | undefined => {
 		const parsed = BashInput.safeParse(event.input);
 
 		if (!parsed.success || !parsed.data.command) return undefined;
-		const shas = inventedShas(parsed.data.command, parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd);
+		const command = parsed.data.command;
+		const rest = Date.now() - graphqlSpentAt < GRAPHQL_HOLD_MS ? restFallback(command) : undefined;
+
+		if (rest) {
+			return {
+				block: true,
+				reason: `[path-guard] GitHub refused GraphQL in this session ${Math.round((Date.now() - graphqlSpentAt) / 60_000)} min ago, and gh pr uses GraphQL, so this call would fail the same way. REST has its own budget: ${rest}. Check the GraphQL budget with: gh api rate_limit --jq .resources.graphql`,
+			};
+		}
+
+		const shas = inventedShas(command, parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd);
 
 		if (shas.length === 0) return undefined;
 
@@ -879,6 +926,15 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		if (event.toolName === "bash") {
 			const parsed = BashInput.safeParse(event.input);
 			const typos = parsed.success && GH_NOT_FOUND.test(text) ? ownerTypoHints(parsed.data.command ?? "") : [];
+
+			if (GRAPHQL_LIMIT.test(text)) {
+				graphqlSpentAt = Date.now();
+				const rest = parsed.success ? restFallback(parsed.data.command ?? "") : undefined;
+
+				typos.push(
+					`[path-guard] GitHub's GraphQL budget is spent; it refills hourly, and gh pr commands use it, so a retry fails the same way. REST has its own budget${rest ? `: ${rest}` : " (gh api repos/{owner}/{repo}/...)"}.`,
+				);
+			}
 
 			if (!event.isError) return typos;
 			const bashCwd = parsed.success && parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
