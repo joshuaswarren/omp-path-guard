@@ -684,12 +684,12 @@ export function herdrHints(command: string, text: string): string[] {
 
 /** Objects that git's error lines name but this clone does not hold: the clone may lag its remote. */
 export function missingCommitHints(command: string, text: string, cwd: string): string[] {
-	// git -C names another repository than cwd, so cwd cannot answer for it.
-	if (/\bgit\s+(?:\S+\s+)*?-C\s/.test(command)) return [];
+	// Only git's own errors name its objects; git -C names another repository than cwd.
+	if (!/\bgit\s/.test(command) || /\bgit\s+(?:\S+\s+)*?-C\s/.test(command)) return [];
 	const errors = text.split("\n").filter(l => /fatal:|error:|unknown revision|bad object|not a valid/i.test(l));
 
-	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); three are enough.
-	const shas = [...new Set(errors.flatMap(l => l.match(/\b[0-9a-f]{7,40}\b/g) ?? []))]
+	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); a dash marks a UUID part.
+	const shas = [...new Set(errors.flatMap(l => l.match(/(?<![\w-])[0-9a-f]{7,40}(?![\w-])/g) ?? []))]
 		.filter(s => /\d/.test(s) && /[a-f]/.test(s))
 		.slice(0, 3);
 
@@ -698,11 +698,12 @@ export function missingCommitHints(command: string, text: string, cwd: string): 
 	if (!top) return [];
 
 	return shas.flatMap(sha => {
-		const known = git(["cat-file", "-e", sha], top);
+		// Empty output: no object of any type starts with these characters (an ambiguous prefix lists several).
+		const known = git(["rev-parse", `--disambiguate=${sha}`], top);
 
-		return known.answered && known.out === undefined
+		return known.answered && known.out?.trim() === ""
 			? [
-					`[path-guard] commit '${sha}' is not in the clone at '${top}'; the clone may lag its remote. Fetch first (git fetch origin, or git fetch origin ${sha}) and retry; do not treat this clone as current until it has the commit.`,
+					`[path-guard] '${sha}' names no object in the clone at '${top}'; the clone may lag its remote. Fetch first (git fetch origin, or git fetch origin ${sha}) and retry; do not treat this clone as current until it has the object.`,
 				]
 			: [];
 	});
