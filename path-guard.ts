@@ -740,6 +740,23 @@ export function inventedShas(command: string, cwd: string): [string, string][] {
 	return found;
 }
 
+/** A command that sends data to GitHub, where a wrong SHA is accepted or fails late instead of failing locally. */
+export function remoteWrite(command: string): boolean {
+	return /\bgh\s|\bcurl\s[^;&|\n]*github/.test(command);
+}
+
+/** Each 40-hex SHA in `command` that `known` does not accept and that is no commit of the repository at `cwd`. */
+export function unseenShas(command: string, cwd: string, known: (sha: string) => boolean): string[] {
+	if (NOTE_COMMAND.test(command)) return [];
+
+	return [...new Set(command.match(FULL_SHA) ?? [])].filter(sha => {
+		if (known(sha)) return false;
+		const local = git(["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], cwd);
+
+		return local.answered && local.out === undefined;
+	});
+}
+
 /**
  * Each `<home parent>/<name>` in `text` whose whole component is one or two edits from the user name
  * and does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
@@ -1031,6 +1048,10 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const refusedPops = new Set<string>();
 	/** Commands refused once for a git write after an unguarded cd; the same command asked again runs. */
 	const refusedChains = new Set<string>();
+	/** Full SHAs that appeared in any tool output this session: a SHA copied from output is one of these. */
+	const seenShas = new Set<string>();
+	/** Unseen SHAs already refused once; a command that repeats one runs. */
+	const refusedShas = new Set<string>();
 
 	/**
 	 * The older stash a bare pop in `command` would apply because the stash before it saves nothing:
@@ -1135,7 +1156,18 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 		const shas = inventedShas(command, bashCwd);
 
-		if (shas.length === 0) return undefined;
+		if (shas.length === 0) {
+			const unseen = remoteWrite(command) ? unseenShas(command, bashCwd, s => seenShas.has(s) || refusedShas.has(s)) : [];
+
+			if (unseen.length === 0) return undefined;
+
+			for (const sha of unseen) refusedShas.add(sha);
+
+			return {
+				block: true,
+				reason: `[path-guard] ${unseen.map(s => `'${s}'`).join(", ")} appeared in no tool output in this session and is not a commit in this clone, so it may be completed by hand. Copy a full SHA from output (gh api repos/{owner}/{repo}/pulls/<n> --jq .head.sha, git rev-parse), or repeat this command if you copied it from elsewhere.`,
+			};
+		}
 
 		return {
 			block: true,
@@ -1272,8 +1304,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			notices.delete(event.toolCallId);
 			const tracked = event.toolName === "bash" || event.toolName === "edit" || PATH_TOOLS.has(event.toolName);
 
-			if (!tracked) return undefined;
 			const text = event.content.map(b => b.text ?? "").join("\n");
+
+			if (seenShas.size > 10_000) seenShas.clear();
+
+			for (const sha of text.match(FULL_SHA) ?? []) seenShas.add(sha);
+
+			if (!tracked) return undefined;
 
 			if (!event.isError && event.toolName !== "bash") {
 				if (event.toolName !== "glob" && event.toolName !== "find") {

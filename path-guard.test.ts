@@ -568,6 +568,20 @@ describe("bash: hand-completed SHA", () => {
 		expect(call("bash", { command: `~/.local/bin/agent-note mistake 'used ${invent(real)}'` })).toBeUndefined();
 		expect(call("bash", { command: `git show ${invent(real)}`, cwd: plain })).toBeUndefined();
 	});
+
+	test("a GitHub command with a full SHA that no output showed and no local commit holds is refused once", () => {
+		const { call, result } = load();
+		const unseen = "0a1b2c3d4e".repeat(4);
+		const status = `gh api repos/joshuaswarren/blend/statuses/${unseen} -f state=success`;
+		const held = call("bash", { command: status, cwd: code });
+		expect(held && "reason" in held ? held.reason : "").toContain(`'${unseen}' appeared in no tool output`);
+		expect(call("bash", { command: status, cwd: code })).toBeUndefined();
+
+		const copied = "9f8e7d6c5b".repeat(4);
+		result("bash", { command: "gh api repos/joshuaswarren/blend/pulls/7 --jq .head.sha", cwd: code }, `${copied}\n`, false);
+		expect(call("bash", { command: `gh pr comment 7 --body "Tested ${copied}"`, cwd: code })).toBeUndefined();
+		expect(call("bash", { command: `git fetch origin ${"1234abcd".repeat(5)}`, cwd: code })).toBeUndefined();
+	});
 });
 
 describe("bash: home directory typo", () => {
