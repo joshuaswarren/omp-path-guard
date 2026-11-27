@@ -440,6 +440,36 @@ describe("bash: herdr agent list shape", () => {
 	});
 });
 
+describe("bash: pop after a stash that saved nothing", () => {
+	let stashed: string;
+
+	beforeAll(() => {
+		stashed = join(base, "stashed");
+		repo(stashed, ["a.txt"]);
+		put(join(stashed, "a.txt"), "old lane work\n");
+		execFileSync("git", ["-C", stashed, "stash", "push", "-qm", "old lane stash"], { stdio: "pipe" });
+	});
+
+	test("a bare pop after 'No local changes to save' is refused once and names the old stash", () => {
+		const { call, result } = load();
+		result("bash", { command: "git stash", cwd: stashed }, "No local changes to save", false);
+		const pop = call("bash", { command: "git stash pop", cwd: stashed });
+		expect(pop).toMatchObject({ block: true });
+		expect(pop && "reason" in pop ? pop.reason : "").toContain("old lane stash");
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
+
+	test("a named stash, a stash that saved work, and other repositories run unchanged", () => {
+		const { call, result } = load();
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+		result("bash", { command: "git stash", cwd: stashed }, "No local changes to save", false);
+		expect(call("bash", { command: "git stash pop stash@{0}", cwd: stashed })).toBeUndefined();
+		expect(call("bash", { command: "git stash pop", cwd: code })).toBeUndefined();
+		result("bash", { command: "git stash", cwd: stashed }, "Saved working directory and index state WIP on main", false);
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
+});
+
 describe("bash: hand-completed SHA", () => {
 	// The real SHA's first 10 characters, then 30 that differ from it.
 	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);

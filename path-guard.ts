@@ -139,6 +139,10 @@ const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 // Shared leading characters that make "same commit" certain; below 8 a remote-only commit could collide.
 const SHA_PREFIXES = [12, 10, 8];
 const NOTE_COMMAND = /(?:^|[\s;&|(/])agent-note(?:\s|$)/;
+const STASH_COMMAND = /\bgit\s+(?:-C\s+\S+\s+)?stash\b/;
+
+// A pop or apply that names no stash takes stash@{0}, whoever saved it.
+const BARE_STASH_POP = /\bgit\s+(?:-C\s+\S+\s+)?stash\s+(?:pop|apply)(?:\s+-[\w-]+)*\s*(?:$|[;&|)])/;
 
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
@@ -889,6 +893,17 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	let findTimedOutAt = Number.NEGATIVE_INFINITY;
 	/** Finds already refused once; the same find asked again runs, so the agent can still reach the judge. */
 	const refusedFinds = new Set<string>();
+	/** Repositories where this session's last git stash saved nothing. */
+	const noopStashRepos = new Set<string>();
+
+	/** The older stash a bare pop would apply after a stash that saved nothing; asked once per such stash. */
+	const takeNoopStash = (cwd: string): string | undefined => {
+		const top = git(["rev-parse", "--show-toplevel"], cwd).out?.trim();
+
+		if (!top || !noopStashRepos.delete(top)) return undefined;
+
+		return git(["stash", "list", "-1", "--format=%gd (%cr): %s"], top).out?.trim() || undefined;
+	};
 
 	/** Answer a find with the literal search at once while this session's judge is missing the budget. */
 	const onFindCall = (event: ToolEvent, cwd: string): CallOutcome | undefined => {
@@ -922,7 +937,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 		if (!parsed.success || !parsed.data.command) return undefined;
 		const command = parsed.data.command;
-		// Quoted text (an echo, a note) names gh pr without running it.
+		// Quoted text (an echo, a note) names gh pr or git stash without running it.
 		const runs = shellRuns(command).flatMap(r => (r.code ? [r.text] : []));
 		const held = Date.now() - graphqlSpentAt < GRAPHQL_HOLD_MS && GH_PR.test(runs.join(" "));
 		const rest = held ? restFallback(command) : undefined;
@@ -934,7 +949,17 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			};
 		}
 
-		const shas = inventedShas(command, parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd);
+		const bashCwd = parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
+		const oldStash = BARE_STASH_POP.test(runs.join(" ")) ? takeNoopStash(bashCwd) : undefined;
+
+		if (oldStash) {
+			return {
+				block: true,
+				reason: `[path-guard] git stash in this session saved nothing ("No local changes to save"), so this pop would apply an older stash: ${oldStash}. Name the stash (git stash list; git stash pop stash@{N}) or repeat this command if you mean it.`,
+			};
+		}
+
+		const shas = inventedShas(command, bashCwd);
 
 		if (shas.length === 0) return undefined;
 
@@ -995,6 +1020,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			const typos = parsed.success && GH_NOT_FOUND.test(text) ? ownerTypoHints(parsed.data.command ?? "") : [];
 
 			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
+
+			if (parsed.success && STASH_COMMAND.test(parsed.data.command ?? "")) {
+				const top = git(["rev-parse", "--show-toplevel"], parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd).out?.trim();
+
+				if (top && text.includes("No local changes to save")) noopStashRepos.add(top);
+				else if (top && text.includes("Saved working directory")) noopStashRepos.delete(top);
+			}
 
 			if (GRAPHQL_LIMIT.test(text)) {
 				graphqlSpentAt = Date.now();
