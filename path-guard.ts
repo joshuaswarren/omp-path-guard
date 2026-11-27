@@ -750,9 +750,12 @@ export function remoteWrites(command: string): string {
 	const api = /\bgh\s+api\b.*\s(?:-[fF]|--field|--raw-field|--input|-X\s*(?!GET\b)[A-Z]|--method[=\s]+(?!GET\b)[A-Z])/;
 	const sends = /\s(?:-d|--data[\w-]*|-T|--upload-file|-X\s*(?!GET\b)[A-Z]|--request[=\s]+(?!GET\b)[A-Z])/;
 
+	// gh api -X GET sends its fields as query parameters: a read.
+	const read = /\s(?:-X\s*GET\b|--method[=\s]+GET\b)/;
+
 	return command
 		.split("\n")
-		.filter(l => gh.test(l) || api.test(l) || (/\bcurl\b/.test(l) && /github/.test(l) && sends.test(l)))
+		.filter(l => gh.test(l) || (api.test(l) && !read.test(l)) || (/\bcurl\b/.test(l) && /github/.test(l) && sends.test(l)))
 		.join("\n");
 }
 

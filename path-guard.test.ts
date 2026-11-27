@@ -585,6 +585,7 @@ describe("bash: hand-completed SHA", () => {
 		const other = "5e6f7a8b9c".repeat(4);
 		expect(call("bash", { command: `gh api repos/joshuaswarren/blend/commits/${other}`, cwd: code })).toBeUndefined();
 		expect(call("bash", { command: `curl -LO https://github.com/joshuaswarren/blend/archive/${other}.tar.gz`, cwd: code })).toBeUndefined();
+		expect(call("bash", { command: `gh api search/issues -X GET -f 'q=repo:joshuaswarren/blend ${other} type:pr'`, cwd: code })).toBeUndefined();
 		expect(call("bash", { command: `gh pr comment 7 --body "Tested ${other}"`, cwd: plain })).toBeUndefined();
 		expect(call("bash", { command: `gh pr comment 7 --body "Tested ${other}"`, cwd: code })).toMatchObject({ block: true });
 	});
