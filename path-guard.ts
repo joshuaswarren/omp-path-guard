@@ -686,11 +686,14 @@ export function herdrHints(command: string, text: string): string[] {
 export function missingCommitHints(command: string, text: string, cwd: string): string[] {
 	// Only git's own errors name its objects. -C, --git-dir, --work-tree, GIT_DIR and a cd or pushd step
 	// point git at another repository than cwd, so cwd cannot answer for it.
-	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|(?:^|[;&|(\n]\s*)(?:cd|pushd)\s/.test(command)) {
+	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|(?:^|[;&|(\n'"]\s*)(?:cd|pushd)\s/.test(command)) {
 		return [];
 	}
 
-	const errors = text.split("\n").filter(l => /fatal:|error:|unknown revision|bad object|not a valid/i.test(l));
+	// Only git's missing-object phrasings, so another step's "error: checksum f47ac10 mismatch" is not read as one.
+	const errors = text
+		.split("\n")
+		.filter(l => /bad object|not a valid (?:object|commit) name|unknown revision|ambiguous argument|bad revision|no such commit/i.test(l));
 
 	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); a dash marks a UUID part.
 	const shas = [...new Set(errors.flatMap(l => l.match(/(?<![\w-])[0-9a-f]{7,40}(?![\w-])/g) ?? []))]

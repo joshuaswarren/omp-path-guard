@@ -563,6 +563,8 @@ describe("bash: a commit the clone does not hold", () => {
 			[`git -C${base} log ddd95a7`, "fatal: bad object ddd95a7", code],
 			[`git --git-dir=${base}/.git log ddd95a7`, "fatal: bad object ddd95a7", code],
 			[`cd ${base} && git log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`bash -c 'cd ${base} && git log ddd95a7'`, "fatal: bad object ddd95a7", code],
+			["git status && ./deploy.sh", "error: checksum f47ac10 mismatch", code],
 			["git log ddd95a7", "fatal: not a git repository; ddd95a7", base],
 		]) {
 			expect(lastText(result("bash", { command, cwd }, text, true))).not.toContain("names no object");
