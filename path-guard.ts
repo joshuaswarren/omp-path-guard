@@ -144,6 +144,10 @@ const NOTE_COMMAND = /(?:^|[\s;&|(/])agent-note(?:\s|$)/;
 const STASH_STEP = /^(?:\w+=\S*\s+)*git((?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?))*)\s+stash\b\s*(.*)$/;
 const STASH_UNTRACKED = /^(?:-u|-a|--include-untracked|--all)$/;
 
+// A git step that changes the repository or its working tree; group 1 holds git's global options.
+const GIT_WRITE =
+	/^(?:\w+=\S*\s+)*git((?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?))*)\s+(?:sparse-checkout|reset|checkout|switch|clean|stash|commit|push|merge|rebase|rm|restore|add|mv|cherry-pick|revert|pull|am|apply|worktree|branch|tag)\b/;
+
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
 
@@ -827,22 +831,84 @@ function wholeTreePush(args: string[]): boolean {
 	return true;
 }
 
-/** The git stash steps of `command`, in order; quoted text is data, and a quoted cd or -C target ends the walk. */
-export function stashSteps(command: string, cwd: string): StashStep[] {
-	const code = shellRuns(command)
+interface ShellStep {
+	/** The step's code: quoted text masked as '', redirects and subshell brackets dropped. */
+	text: string;
+	/** The separator after the step: &&, ||, ;, |, a newline, or "" at the end. */
+	next: string;
+}
+
+/** `command` cut into steps at &&, ||, ;, | and newlines; quoted text is data, never a separator. */
+export function shellSteps(command: string): ShellStep[] {
+	const parts = shellRuns(command)
 		.map(r => (r.code ? r.text : " '' "))
-		.join("");
+		.join("")
+		.split(/(&&|\|\||[;|\n])/);
 
-	const steps: StashStep[] = [];
-	let dir = cwd;
-	let changedBefore = false;
+	const steps: ShellStep[] = [];
 
-	for (const raw of code.split(/&&|\|\||[;|\n]/)) {
-		const step = raw
+	for (let i = 0; i < parts.length; i += 2) {
+		const text = parts[i]
 			.replace(/\s*\d*[<>]+&?\s*\S+/g, "")
 			.trim()
 			.replace(/^[({]\s*|\s*[)}]$/g, "");
 
+		steps.push({ text, next: parts[i + 1] ?? "" });
+	}
+
+	return steps;
+}
+
+/**
+ * A cd to a directory that does not exist yet, not joined by && to the git write after it: if the cd
+ * fails, that git write runs in the previous directory. Returns the missing directory, the git step,
+ * and the directory it would run in.
+ */
+export function unguardedCd(command: string, cwd: string): [string, string, string] | undefined {
+	const steps = shellSteps(command);
+
+	if (/^set\s+-[a-z]*e/.test(steps[0]?.text ?? "")) return undefined;
+	let dir = cwd;
+	let failedCd: string | undefined;
+	let skipping = false;
+	let before = "";
+
+	for (const { text, next } of steps) {
+		const skipped = skipping && before === "&&";
+		before = next;
+
+		if (skipped) continue;
+		skipping = false;
+		const cd = /^cd(?:\s+(\S+))?$/.exec(text);
+
+		if (cd?.[1] === "''") return undefined;
+
+		if (cd) {
+			const target = toAbs(cd[1] ?? homedir(), dir);
+			skipping = !existsSync(target);
+			failedCd = skipping ? target : undefined;
+			dir = skipping ? dir : target;
+			continue;
+		}
+
+		if (!failedCd) continue;
+
+		if (/^(?:exit|return)\b/.test(text)) return undefined;
+		const write = GIT_WRITE.exec(text);
+
+		if (write && !/-C\s/.test(write[1])) return [failedCd, text, dir];
+	}
+
+	return undefined;
+}
+
+/** The git stash steps of `command`, in order; quoted text is data, and a quoted cd or -C target ends the walk. */
+export function stashSteps(command: string, cwd: string): StashStep[] {
+	const steps: StashStep[] = [];
+	let dir = cwd;
+	let changedBefore = false;
+
+	for (const { text: step } of shellSteps(command)) {
 		const cd = /^cd(?:\s+(\S+))?$/.exec(step);
 		const m = cd ? null : STASH_STEP.exec(step);
 		const targets = cd ? [cd[1] ?? homedir()] : [...(m?.[1] ?? "").matchAll(/-C\s+(\S+)/g)].map(t => t[1]);
@@ -962,6 +1028,8 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** Bare pops already refused once; the same command asked again runs. */
 	const refusedPops = new Set<string>();
+	/** Commands refused once for a git write after an unguarded cd; the same command asked again runs. */
+	const refusedChains = new Set<string>();
 
 	/**
 	 * The older stash a bare pop in `command` would apply because the stash before it saves nothing:
@@ -1044,6 +1112,17 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		}
 
 		const bashCwd = parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
+		const chain = refusedChains.has(command) ? undefined : unguardedCd(command, bashCwd);
+
+		if (chain) {
+			refusedChains.add(command);
+
+			return {
+				block: true,
+				reason: `[path-guard] '${chain[0]}' does not exist yet, and the cd into it is not joined to '${chain[1]}' with &&. If that cd fails, the git command runs in '${chain[2]}' instead. Join the steps with && (or start with set -e), or repeat this command if you mean it.`,
+			};
+		}
+
 		const oldStash = foreignStash(command, bashCwd);
 
 		if (oldStash) {
