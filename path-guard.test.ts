@@ -531,6 +531,9 @@ describe("bash: git write after a cd that may fail", () => {
 		for (const command of [
 			`mkdir -p ${base}/made && cd ${base}/made && git init`,
 			`set -euo pipefail; cd ${base}/gone; git commit -m x`,
+			`set -o errexit; cd ${base}/gone; git commit -m x`,
+			"cd -; git commit -m x",
+			"cd $WORKTREE; git reset --hard",
 			`cd ${base}/gone || exit 1; git reset --hard`,
 			`cd ${base}/gone; git -C ${code} reset --hard`,
 			`cd ${code}; git reset --hard`,

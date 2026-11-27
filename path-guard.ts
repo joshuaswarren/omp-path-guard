@@ -867,7 +867,7 @@ export function shellSteps(command: string): ShellStep[] {
 export function unguardedCd(command: string, cwd: string): [string, string, string] | undefined {
 	const steps = shellSteps(command);
 
-	if (/^set\s+-[a-z]*e/.test(steps[0]?.text ?? "")) return undefined;
+	if (/^set\s+(?:-[a-z]*e|-o\s+errexit)/.test(steps[0]?.text ?? "")) return undefined;
 	let dir = cwd;
 	let failedCd: string | undefined;
 	let skipping = false;
@@ -881,7 +881,8 @@ export function unguardedCd(command: string, cwd: string): [string, string, stri
 		skipping = false;
 		const cd = /^cd(?:\s+(\S+))?$/.exec(text);
 
-		if (cd?.[1] === "''") return undefined;
+		// A quoted, variable, or option target (cd "$X", cd $X, cd -) cannot be checked before the command runs.
+		if (cd?.[1] && /^-|''|[$`]/.test(cd[1])) return undefined;
 
 		if (cd) {
 			const target = toAbs(cd[1] ?? homedir(), dir);
