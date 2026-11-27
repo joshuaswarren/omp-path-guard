@@ -686,7 +686,7 @@ export function herdrHints(command: string, text: string): string[] {
 export function missingCommitHints(command: string, text: string, cwd: string): string[] {
 	// Only git's own errors name its objects. -C, --git-dir, --work-tree, GIT_DIR, any cd or pushd, and a
 	// remote or container wrapper point git at another repository than cwd, so cwd cannot answer for it.
-	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|\b(?:cd|pushd|ssh|docker|podman|kubectl|pct)\s/.test(command)) {
+	if (!/\bgit\s/.test(command) || /\s(?:-C|--chdir|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|\b(?:cd|pushd|ssh|docker|podman|kubectl|pct)\s/.test(command)) {
 		return [];
 	}
 
@@ -695,8 +695,8 @@ export function missingCommitHints(command: string, text: string, cwd: string): 
 		.split("\n")
 		.filter(l => /bad object|not a valid (?:object|commit) name|unknown revision|ambiguous argument|bad revision|no such commit/i.test(l));
 
-	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); a dash marks a UUID part.
-	const shas = [...new Set(errors.flatMap(l => l.match(/(?<![\w-])[0-9a-f]{7,40}(?![\w-])/g) ?? []))]
+	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); a dash or slash marks a UUID or path part.
+	const shas = [...new Set(errors.flatMap(l => l.match(/(?<![\w/-])[0-9a-f]{7,40}(?![\w/-])/g) ?? []))]
 		.filter(s => /\d/.test(s) && /[a-f]/.test(s))
 		.slice(0, 3);
 
