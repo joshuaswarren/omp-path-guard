@@ -684,9 +684,9 @@ export function herdrHints(command: string, text: string): string[] {
 
 /** Objects that git's error lines name but this clone does not hold: the clone may lag its remote. */
 export function missingCommitHints(command: string, text: string, cwd: string): string[] {
-	// Only git's own errors name its objects. -C, --git-dir, --work-tree, GIT_DIR and a cd or pushd step
-	// point git at another repository than cwd, so cwd cannot answer for it.
-	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|(?:^|[;&|(\n'"]\s*)(?:cd|pushd)\s/.test(command)) {
+	// Only git's own errors name its objects. -C, --git-dir, --work-tree, GIT_DIR, any cd or pushd, and a
+	// remote or container wrapper point git at another repository than cwd, so cwd cannot answer for it.
+	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|\b(?:cd|pushd|ssh|docker|podman|kubectl|pct)\s/.test(command)) {
 		return [];
 	}
 
