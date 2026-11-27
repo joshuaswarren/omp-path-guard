@@ -440,6 +440,81 @@ describe("bash: herdr agent list shape", () => {
 	});
 });
 
+describe("bash: pop after a stash that saved nothing", () => {
+	let stashed: string;
+
+	beforeAll(() => {
+		stashed = join(base, "stashed");
+		repo(stashed, ["a.txt"]);
+		put(join(stashed, "a.txt"), "old lane work\n");
+		execFileSync("git", ["-C", stashed, "stash", "push", "-qm", "old lane stash"], { stdio: "pipe" });
+	});
+
+	test("a bare pop after 'No local changes to save' is refused once and names the old stash", () => {
+		const { call, result } = load();
+		result("bash", { command: "git stash", cwd: stashed }, "No local changes to save", false);
+		const pop = call("bash", { command: "git stash pop", cwd: stashed });
+		expect(pop).toMatchObject({ block: true });
+		expect(pop && "reason" in pop ? pop.reason : "").toContain("old lane stash");
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
+
+	test("a named stash, a stash that saved work, and other repositories run unchanged", () => {
+		const { call, result } = load();
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+		result("bash", { command: "git stash", cwd: stashed }, "No local changes to save", false);
+		expect(call("bash", { command: "git stash pop stash@{0}", cwd: stashed })).toBeUndefined();
+		expect(call("bash", { command: "git stash pop", cwd: code })).toBeUndefined();
+		result("bash", { command: "git stash", cwd: stashed }, "Saved working directory and index state WIP on main", false);
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
+
+	test("-C and cd name the repository on both sides; redirects do not hide the pop", () => {
+		const { call, result } = load();
+		result("bash", { command: `git -C ${stashed} stash`, cwd: code }, "No local changes to save", false);
+		const pop = call("bash", { command: `cd ${stashed} && git stash pop 2>&1`, cwd: code });
+		expect(pop && "reason" in pop ? pop.reason : "").toContain("old lane stash");
+		expect(call("bash", { command: `cd ${stashed} && git stash pop 2>&1`, cwd: code })).toBeUndefined();
+
+		const second = load();
+		second.result("bash", { command: `cd ${stashed}; git --no-pager stash`, cwd: code }, "No local changes to save", false);
+		expect(second.call("bash", { command: `(cd ${stashed} && git stash pop)`, cwd: code })).toMatchObject({ block: true });
+	});
+
+	test("a stash and a bare pop in one command are refused on a clean tree and run on a dirty one", () => {
+		const { call } = load();
+		const pop = call("bash", { command: "git stash && git pull --rebase && git stash pop", cwd: stashed });
+		expect(pop && "reason" in pop ? pop.reason : "").toContain("old lane stash");
+
+		const dirty = join(base, "dirty-stash");
+		repo(dirty, ["a.txt"]);
+		put(join(dirty, "a.txt"), "older work\n");
+		execFileSync("git", ["-C", dirty, "stash", "push", "-qm", "older stash"], { stdio: "pipe" });
+		put(join(dirty, "a.txt"), "current work\n");
+		expect(call("bash", { command: "git stash && git pull --rebase && git stash pop", cwd: dirty })).toBeUndefined();
+		expect(call("bash", { command: "echo new > a.txt && git stash && git stash pop", cwd: stashed })).toBeUndefined();
+		expect(call("bash", { command: "git stash push -- a.txt && git stash pop", cwd: stashed })).toBeUndefined();
+		expect(call("bash", { command: "git --no-pager stash && git stash pop", cwd: stashed })).toMatchObject({ block: true });
+	});
+
+	test("quoted text that names git stash marks nothing", () => {
+		const { call, result } = load();
+		result("bash", { command: 'echo "git stash"', cwd: stashed }, "No local changes to save", false);
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
+
+	test("each push's own output marks its repository", () => {
+		const { call, result } = load();
+		const output = "No local changes to save\nSaved working directory and index state WIP on main";
+		result("bash", { command: `git -C ${stashed} stash; git -C ${code} stash`, cwd: base }, output, false);
+		expect(call("bash", { command: `git -C ${stashed} stash pop`, cwd: base })).toMatchObject({ block: true });
+
+		const quiet = load();
+		quiet.result("bash", { command: `git -C ${stashed} stash -q; git -C ${code} stash`, cwd: base }, "No local changes to save", false);
+		expect(quiet.call("bash", { command: `git -C ${stashed} stash pop`, cwd: base })).toBeUndefined();
+	});
+});
+
 describe("bash: hand-completed SHA", () => {
 	// The real SHA's first 10 characters, then 30 that differ from it.
 	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);

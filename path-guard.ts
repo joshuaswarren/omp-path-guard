@@ -140,6 +140,10 @@ const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 const SHA_PREFIXES = [12, 10, 8];
 const NOTE_COMMAND = /(?:^|[\s;&|(/])agent-note(?:\s|$)/;
 
+// One shell step that runs git stash. Group 1 holds git's global options (-C names the repository); group 2 the subcommand and its arguments.
+const STASH_STEP = /^(?:\w+=\S*\s+)*git((?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?))*)\s+stash\b\s*(.*)$/;
+const STASH_UNTRACKED = /^(?:-u|-a|--include-untracked|--all)$/;
+
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
 
@@ -800,6 +804,70 @@ export function shellRuns(command: string): ShellRun[] {
 	return runs;
 }
 
+interface StashStep {
+	/** The directory git runs in, after cd and -C. */
+	dir: string;
+	/** push saves the tree; pop is a pop or apply that names no stash, so it takes stash@{0}, whoever saved it. */
+	act: "push" | "pop" | "other";
+	/** The push also saves untracked files. */
+	untracked: boolean;
+	/** git status before the command predicts what this push saves: no pathspec, and no earlier step that may change files. */
+	predictable: boolean;
+	/** git prints nothing for this push, so its output cannot say what it saved. */
+	quiet: boolean;
+}
+
+/** Whether stash push arguments name only options and a message, so the push saves the whole tree. */
+function wholeTreePush(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === "-m" || args[i] === "--message") i++;
+		else if (args[i] === "--" || !args[i].startsWith("-")) return false;
+	}
+
+	return true;
+}
+
+/** The git stash steps of `command`, in order; quoted text is data, and a quoted cd or -C target ends the walk. */
+export function stashSteps(command: string, cwd: string): StashStep[] {
+	const code = shellRuns(command)
+		.map(r => (r.code ? r.text : " '' "))
+		.join("");
+
+	const steps: StashStep[] = [];
+	let dir = cwd;
+	let changedBefore = false;
+
+	for (const raw of code.split(/&&|\|\||[;|\n]/)) {
+		const step = raw
+			.replace(/\s*\d*[<>]+&?\s*\S+/g, "")
+			.trim()
+			.replace(/^[({]\s*|\s*[)}]$/g, "");
+
+		const cd = /^cd(?:\s+(\S+))?$/.exec(step);
+		const m = cd ? null : STASH_STEP.exec(step);
+		const targets = cd ? [cd[1] ?? homedir()] : [...(m?.[1] ?? "").matchAll(/-C\s+(\S+)/g)].map(t => t[1]);
+
+		if (targets.includes("''")) return steps;
+
+		if (cd) dir = toAbs(targets[0], dir);
+		else if (!m) changedBefore ||= step !== "";
+
+		if (!m) continue;
+		const [sub = "push", ...rest] = m[2].split(/\s+/).filter(Boolean);
+		const push = sub.startsWith("-") || sub === "push" || sub === "save";
+		const pop = (sub === "pop" || sub === "apply") && rest.every(a => a.startsWith("-"));
+		steps.push({
+			dir: targets.reduce((at, t) => toAbs(t, at), dir),
+			act: push ? "push" : pop ? "pop" : "other",
+			untracked: push && [sub, ...rest].some(a => STASH_UNTRACKED.test(a)),
+			predictable: push && !changedBefore && (sub === "save" || wholeTreePush(sub === "push" ? rest : [sub, ...rest])),
+			quiet: push && [sub, ...rest].some(a => a === "-q" || a === "--quiet"),
+		});
+	}
+
+	return steps;
+}
+
 /**
  * Home typos in the unquoted part of a local command. Quoted text may be data (an agent-note about the
  * typo), and a remote command's paths belong to another machine, so neither counts.
@@ -889,6 +957,47 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	let findTimedOutAt = Number.NEGATIVE_INFINITY;
 	/** Finds already refused once; the same find asked again runs, so the agent can still reach the judge. */
 	const refusedFinds = new Set<string>();
+	/** Repositories where this session's last git stash saved nothing. */
+	const noopStashRepos = new Set<string>();
+
+	/** Bare pops already refused once; the same command asked again runs. */
+	const refusedPops = new Set<string>();
+
+	/**
+	 * The older stash a bare pop in `command` would apply because the stash before it saves nothing:
+	 * a push earlier in the same command on a clean tree, or this session's last push in that repository.
+	 */
+	const foreignStash = (command: string, cwd: string): string | undefined => {
+		if (refusedPops.has(command)) return undefined;
+		/** Repository → whether this command's own push saves nothing. */
+		const pushed = new Map<string, boolean>();
+
+		for (const step of stashSteps(command, cwd)) {
+			const top = step.act === "other" ? undefined : git(["rev-parse", "--show-toplevel"], step.dir).out?.trim();
+
+			if (!top) continue;
+
+			if (step.act === "push") {
+				const changes = git(["status", "--porcelain", `--untracked-files=${step.untracked ? "all" : "no"}`], top).out;
+				pushed.set(top, step.predictable && changes === "");
+				continue;
+			}
+
+			const savesNothing = pushed.get(top) ?? noopStashRepos.has(top);
+			pushed.set(top, false);
+
+			if (!savesNothing) continue;
+			const old = git(["stash", "list", "-1", "--format=%gd (%cr): %s"], top).out?.trim();
+
+			if (!old) continue;
+			noopStashRepos.delete(top);
+			refusedPops.add(command);
+
+			return old;
+		}
+
+		return undefined;
+	};
 
 	/** Answer a find with the literal search at once while this session's judge is missing the budget. */
 	const onFindCall = (event: ToolEvent, cwd: string): CallOutcome | undefined => {
@@ -922,7 +1031,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 		if (!parsed.success || !parsed.data.command) return undefined;
 		const command = parsed.data.command;
-		// Quoted text (an echo, a note) names gh pr without running it.
+		// Quoted text (an echo, a note) names gh pr or git stash without running it.
 		const runs = shellRuns(command).flatMap(r => (r.code ? [r.text] : []));
 		const held = Date.now() - graphqlSpentAt < GRAPHQL_HOLD_MS && GH_PR.test(runs.join(" "));
 		const rest = held ? restFallback(command) : undefined;
@@ -934,7 +1043,17 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			};
 		}
 
-		const shas = inventedShas(command, parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd);
+		const bashCwd = parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
+		const oldStash = foreignStash(command, bashCwd);
+
+		if (oldStash) {
+			return {
+				block: true,
+				reason: `[path-guard] the git stash before this pop saves nothing (clean tree, or "No local changes to save" earlier in this session), so the bare pop would apply an older stash: ${oldStash}. Name the stash (git stash list; git stash pop stash@{N}) or repeat this command if you mean it.`,
+			};
+		}
+
+		const shas = inventedShas(command, bashCwd);
 
 		if (shas.length === 0) return undefined;
 
@@ -995,6 +1114,21 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			const typos = parsed.success && GH_NOT_FOUND.test(text) ? ownerTypoHints(parsed.data.command ?? "") : [];
 
 			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
+
+			const steps = parsed.success ? stashSteps(parsed.data.command ?? "", parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd) : [];
+			const outcomes = text.match(/No local changes to save|Saved working directory/g) ?? [];
+			// Each push that is not quiet prints one of these, in order; another count means a push failed, so none is matched.
+			const matched = outcomes.length === steps.filter(s => s.act === "push" && !s.quiet).length;
+
+			for (const step of steps) {
+				const top = step.act === "other" ? undefined : git(["rev-parse", "--show-toplevel"], step.dir).out?.trim();
+				const outcome = step.act === "push" && !step.quiet && matched ? outcomes.shift() : undefined;
+
+				if (!top) continue;
+
+				if (outcome === "No local changes to save") noopStashRepos.add(top);
+				else noopStashRepos.delete(top);
+			}
 
 			if (GRAPHQL_LIMIT.test(text)) {
 				graphqlSpentAt = Date.now();
