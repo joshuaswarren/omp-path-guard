@@ -813,6 +813,8 @@ interface StashStep {
 	untracked: boolean;
 	/** git status before the command predicts what this push saves: no pathspec, and no earlier step that may change files. */
 	predictable: boolean;
+	/** git prints nothing for this push, so its output cannot say what it saved. */
+	quiet: boolean;
 }
 
 /** Whether stash push arguments name only options and a message, so the push saves the whole tree. */
@@ -836,14 +838,18 @@ export function stashSteps(command: string, cwd: string): StashStep[] {
 	let changedBefore = false;
 
 	for (const raw of code.split(/&&|\|\||[;|\n]/)) {
-		const step = raw.replace(/\s*\d*[<>]+&?\s*\S+/g, "").trim();
-		const cd = /^cd\s+(\S+)$/.exec(step);
+		const step = raw
+			.replace(/\s*\d*[<>]+&?\s*\S+/g, "")
+			.trim()
+			.replace(/^[({]\s*|\s*[)}]$/g, "");
+
+		const cd = /^cd(?:\s+(\S+))?$/.exec(step);
 		const m = cd ? null : STASH_STEP.exec(step);
-		const targets = cd ? [cd[1]] : [...(m?.[1] ?? "").matchAll(/-C\s+(\S+)/g)].map(t => t[1]);
+		const targets = cd ? [cd[1] ?? homedir()] : [...(m?.[1] ?? "").matchAll(/-C\s+(\S+)/g)].map(t => t[1]);
 
 		if (targets.includes("''")) return steps;
 
-		if (cd) dir = toAbs(cd[1], dir);
+		if (cd) dir = toAbs(targets[0], dir);
 		else if (!m) changedBefore ||= step !== "";
 
 		if (!m) continue;
@@ -855,6 +861,7 @@ export function stashSteps(command: string, cwd: string): StashStep[] {
 			act: push ? "push" : pop ? "pop" : "other",
 			untracked: push && [sub, ...rest].some(a => STASH_UNTRACKED.test(a)),
 			predictable: push && !changedBefore && (sub === "save" || wholeTreePush(sub === "push" ? rest : [sub, ...rest])),
+			quiet: push && [sub, ...rest].some(a => a === "-q" || a === "--quiet"),
 		});
 	}
 
@@ -1108,17 +1115,19 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
 
-			// git prints one of these per push that runs, in order, unless the push is quiet.
+			const steps = parsed.success ? stashSteps(parsed.data.command ?? "", parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd) : [];
 			const outcomes = text.match(/No local changes to save|Saved working directory/g) ?? [];
+			// Each push that is not quiet prints one of these, in order; another count means a push failed, so none is matched.
+			const matched = outcomes.length === steps.filter(s => s.act === "push" && !s.quiet).length;
 
-			for (const step of parsed.success ? stashSteps(parsed.data.command ?? "", parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd) : []) {
+			for (const step of steps) {
 				const top = step.act === "other" ? undefined : git(["rev-parse", "--show-toplevel"], step.dir).out?.trim();
-				const outcome = step.act === "push" ? outcomes.shift() : undefined;
+				const outcome = step.act === "push" && !step.quiet && matched ? outcomes.shift() : undefined;
 
 				if (!top) continue;
 
-				if (step.act === "pop" || outcome?.startsWith("Saved")) noopStashRepos.delete(top);
-				else if (outcome) noopStashRepos.add(top);
+				if (outcome === "No local changes to save") noopStashRepos.add(top);
+				else noopStashRepos.delete(top);
 			}
 
 			if (GRAPHQL_LIMIT.test(text)) {

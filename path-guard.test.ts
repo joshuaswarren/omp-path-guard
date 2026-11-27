@@ -477,8 +477,8 @@ describe("bash: pop after a stash that saved nothing", () => {
 		expect(call("bash", { command: `cd ${stashed} && git stash pop 2>&1`, cwd: code })).toBeUndefined();
 
 		const second = load();
-		second.result("bash", { command: `cd ${stashed}; git stash -q`, cwd: code }, "No local changes to save", false);
-		expect(second.call("bash", { command: `git -C ${stashed} stash pop`, cwd: code })).toMatchObject({ block: true });
+		second.result("bash", { command: `cd ${stashed}; git --no-pager stash`, cwd: code }, "No local changes to save", false);
+		expect(second.call("bash", { command: `(cd ${stashed} && git stash pop)`, cwd: code })).toMatchObject({ block: true });
 	});
 
 	test("a stash and a bare pop in one command are refused on a clean tree and run on a dirty one", () => {
@@ -508,6 +508,10 @@ describe("bash: pop after a stash that saved nothing", () => {
 		const output = "No local changes to save\nSaved working directory and index state WIP on main";
 		result("bash", { command: `git -C ${stashed} stash; git -C ${code} stash`, cwd: base }, output, false);
 		expect(call("bash", { command: `git -C ${stashed} stash pop`, cwd: base })).toMatchObject({ block: true });
+
+		const quiet = load();
+		quiet.result("bash", { command: `git -C ${stashed} stash -q; git -C ${code} stash`, cwd: base }, "No local changes to save", false);
+		expect(quiet.call("bash", { command: `git -C ${stashed} stash pop`, cwd: base })).toBeUndefined();
 	});
 });
 
