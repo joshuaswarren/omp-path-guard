@@ -349,6 +349,13 @@ describe("find: judge timeout", () => {
 		expect(call("find", { query: "lease expiry", grep_keywords: [], path: tree })).toBeUndefined();
 	});
 
+	test("a find that answers after a timeout ends the hold", () => {
+		const { call, result } = load();
+		result("find", { query: "lease", grep_keywords: [], path: tree }, TIMEOUT, true);
+		result("find", { query: "lease", grep_keywords: [], path: tree }, "1 hit(s) for lease", false);
+		expect(call("find", { query: "lease expiry", grep_keywords: [], path: tree })).toBeUndefined();
+	});
+
 	test("a find that answered, a partial or quoted timeout, or a scope with no literal search runs unchanged", () => {
 		const { call, result } = load();
 		result("find", { query: "lease", grep_keywords: [], path: tree }, "1 hit(s) for lease", false);

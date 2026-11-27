@@ -980,6 +980,9 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** Suggestion blocks for the missing paths behind a failed call. */
 	const suggestionsFor = (event: ToolResultEvent, cwd: string, text: string): string[] => {
+		// A find that answered proves the judge is back.
+		if (event.toolName === "find" && !event.isError) findTimedOutAt = Number.NEGATIVE_INFINITY;
+
 		if (event.toolName === "find" && event.isError && FIND_TIMED_OUT.test(text.slice(0, 500))) {
 			findTimedOutAt = Date.now();
 			const parsed = FindInput.safeParse(event.input);
