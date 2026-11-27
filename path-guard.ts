@@ -684,8 +684,12 @@ export function herdrHints(command: string, text: string): string[] {
 
 /** Objects that git's error lines name but this clone does not hold: the clone may lag its remote. */
 export function missingCommitHints(command: string, text: string, cwd: string): string[] {
-	// Only git's own errors name its objects; -C, --git-dir and --work-tree name another repository than cwd.
-	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)/.test(command)) return [];
+	// Only git's own errors name its objects. -C, --git-dir, --work-tree, GIT_DIR and a cd or pushd step
+	// point git at another repository than cwd, so cwd cannot answer for it.
+	if (!/\bgit\s/.test(command) || /\bgit\b.*\s(?:-C|--git-dir|--work-tree)|\bGIT_(?:DIR|WORK_TREE)=|(?:^|[;&|(\n]\s*)(?:cd|pushd)\s/.test(command)) {
+		return [];
+	}
+
 	const errors = text.split("\n").filter(l => /fatal:|error:|unknown revision|bad object|not a valid/i.test(l));
 
 	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); a dash marks a UUID part.
