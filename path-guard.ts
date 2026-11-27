@@ -682,6 +682,32 @@ export function herdrHints(command: string, text: string): string[] {
 	return guessed ? [`[path-guard] ${HERDR_LIST_FORMAT}`] : [];
 }
 
+/** Objects that git's error lines name but this clone does not hold: the clone may lag its remote. */
+export function missingCommitHints(command: string, text: string, cwd: string): string[] {
+	// git -C names another repository than cwd, so cwd cannot answer for it.
+	if (/\bgit\s+(?:\S+\s+)*?-C\s/.test(command)) return [];
+	const errors = text.split("\n").filter(l => /fatal:|error:|unknown revision|bad object|not a valid/i.test(l));
+
+	// A digit and a letter tell a SHA from a number (1764250000) or a word (defaced); three are enough.
+	const shas = [...new Set(errors.flatMap(l => l.match(/\b[0-9a-f]{7,40}\b/g) ?? []))]
+		.filter(s => /\d/.test(s) && /[a-f]/.test(s))
+		.slice(0, 3);
+
+	const top = shas.length > 0 ? git(["rev-parse", "--show-toplevel"], cwd).out?.trim() : undefined;
+
+	if (!top) return [];
+
+	return shas.flatMap(sha => {
+		const known = git(["cat-file", "-e", sha], top);
+
+		return known.answered && known.out === undefined
+			? [
+					`[path-guard] commit '${sha}' is not in the clone at '${top}'; the clone may lag its remote. Fetch first (git fetch origin, or git fetch origin ${sha}) and retry; do not treat this clone as current until it has the commit.`,
+				]
+			: [];
+	});
+}
+
 /** The REST (`gh api`) form of a GraphQL-backed `gh pr` command; REST has a separate budget. */
 export function restFallback(command: string): string | undefined {
 	const m = GH_PR.exec(command);
@@ -1194,6 +1220,8 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			const typos = parsed.success && GH_NOT_FOUND.test(text) ? ownerTypoHints(parsed.data.command ?? "") : [];
 
 			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
+
+			if (parsed.success) typos.push(...missingCommitHints(parsed.data.command ?? "", text, parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd));
 
 			const steps = parsed.success ? stashSteps(parsed.data.command ?? "", parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd) : [];
 			const outcomes = text.match(/No local changes to save|Saved working directory/g) ?? [];
