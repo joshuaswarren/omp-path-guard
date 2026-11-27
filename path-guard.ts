@@ -741,6 +741,39 @@ export function inventedShas(command: string, cwd: string): [string, string][] {
 }
 
 /**
+ * The lines of `command` that write to GitHub: a gh comment, review, merge, create or edit, a gh api call
+ * with fields or a non-GET method, or a curl to GitHub that sends data. A wrong SHA there is accepted or
+ * fails late; a read fails at once and does no harm.
+ */
+export function remoteWrites(command: string): string {
+	const gh = /\bgh\s+(?:(?:pr|issue)\s+(?:comment|review|merge|create|edit|close)|release\s+create)\b/;
+	const api = /\bgh\s+api\b.*\s(?:-[fF]|--field|--raw-field|--input|-X\s*(?!GET\b)[A-Z]|--method[=\s]+(?!GET\b)[A-Z])/;
+	const sends = /\s(?:-d|--data[\w-]*|-T|--upload-file|-X\s*(?!GET\b)[A-Z]|--request[=\s]+(?!GET\b)[A-Z])/;
+
+	// gh api -X GET sends its fields as query parameters: a read.
+	const read = /\s(?:-X\s*GET\b|--method[=\s]+GET\b)/;
+
+	return command
+		.split("\n")
+		.filter(l => gh.test(l) || (api.test(l) && !read.test(l)) || (/\bcurl\b/.test(l) && /github/.test(l) && sends.test(l)))
+		.join("\n");
+}
+
+/** Each 40-hex SHA in `text` that `known` does not accept and that is no commit of the repository at `cwd`. */
+export function unseenShas(text: string, cwd: string, known: (sha: string) => boolean): string[] {
+	const shas = [...new Set(text.match(FULL_SHA) ?? [])].filter(sha => !known(sha));
+
+	// Outside a work tree no SHA can be checked, so none is refused.
+	if (NOTE_COMMAND.test(text) || shas.length === 0 || git(["rev-parse", "--is-inside-work-tree"], cwd).out?.trim() !== "true") return [];
+
+	return shas.filter(sha => {
+		const local = git(["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], cwd);
+
+		return local.answered && local.out === undefined;
+	});
+}
+
+/**
  * Each `<home parent>/<name>` in `text` whose whole component is one or two edits from the user name
  * and does not exist (`/home/jososhuawarren` for `/home/joshuawarren`): no file can live there.
  */
@@ -1031,6 +1064,10 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const refusedPops = new Set<string>();
 	/** Commands refused once for a git write after an unguarded cd; the same command asked again runs. */
 	const refusedChains = new Set<string>();
+	/** Full SHAs that appeared in any tool output this session: a SHA copied from output is one of these. */
+	const seenShas = new Set<string>();
+	/** Unseen SHAs already refused once; a command that repeats one runs. */
+	const refusedShas = new Set<string>();
 
 	/**
 	 * The older stash a bare pop in `command` would apply because the stash before it saves nothing:
@@ -1135,7 +1172,18 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 		const shas = inventedShas(command, bashCwd);
 
-		if (shas.length === 0) return undefined;
+		if (shas.length === 0) {
+			const unseen = unseenShas(remoteWrites(command), bashCwd, s => seenShas.has(s) || refusedShas.has(s));
+
+			if (unseen.length === 0) return undefined;
+
+			for (const sha of unseen) refusedShas.add(sha);
+
+			return {
+				block: true,
+				reason: `[path-guard] ${unseen.map(s => `'${s}'`).join(", ")} appeared in no tool output in this session and is not a commit in this clone, so it may be completed by hand. Copy a full SHA from output (gh api repos/{owner}/{repo}/pulls/<n> --jq .head.sha, git rev-parse), or repeat this command if you copied it from elsewhere.`,
+			};
+		}
 
 		return {
 			block: true,
@@ -1272,8 +1320,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 			notices.delete(event.toolCallId);
 			const tracked = event.toolName === "bash" || event.toolName === "edit" || PATH_TOOLS.has(event.toolName);
 
-			if (!tracked) return undefined;
 			const text = event.content.map(b => b.text ?? "").join("\n");
+
+			if (seenShas.size > 10_000) seenShas.clear();
+
+			for (const sha of text.match(FULL_SHA) ?? []) seenShas.add(sha);
+
+			if (!tracked) return undefined;
 
 			if (!event.isError && event.toolName !== "bash") {
 				if (event.toolName !== "glob" && event.toolName !== "find") {
