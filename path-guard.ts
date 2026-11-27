@@ -140,8 +140,8 @@ const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 const SHA_PREFIXES = [12, 10, 8];
 const NOTE_COMMAND = /(?:^|[\s;&|(/])agent-note(?:\s|$)/;
 
-// One shell step that runs git stash; -C names the repository. Group 2 is the subcommand and its arguments.
-const STASH_STEP = /^(?:\w+=\S*\s+)*git\s+(?:-c\s+\S+\s+)*(?:-C\s+(\S+)\s+)?stash\b\s*(.*)$/;
+// One shell step that runs git stash. Group 1 holds git's global options (-C names the repository); group 2 the subcommand and its arguments.
+const STASH_STEP = /^(?:\w+=\S*\s+)*git((?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?))*)\s+stash\b\s*(.*)$/;
 const STASH_UNTRACKED = /^(?:-u|-a|--include-untracked|--all)$/;
 
 export function expandHome(p: string): string {
@@ -811,6 +811,18 @@ interface StashStep {
 	act: "push" | "pop" | "other";
 	/** The push also saves untracked files. */
 	untracked: boolean;
+	/** git status before the command predicts what this push saves: no pathspec, and no earlier step that may change files. */
+	predictable: boolean;
+}
+
+/** Whether stash push arguments name only options and a message, so the push saves the whole tree. */
+function wholeTreePush(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === "-m" || args[i] === "--message") i++;
+		else if (args[i] === "--" || !args[i].startsWith("-")) return false;
+	}
+
+	return true;
 }
 
 /** The git stash steps of `command`, in order; quoted text is data, and a quoted cd or -C target ends the walk. */
@@ -821,25 +833,28 @@ export function stashSteps(command: string, cwd: string): StashStep[] {
 
 	const steps: StashStep[] = [];
 	let dir = cwd;
+	let changedBefore = false;
 
 	for (const raw of code.split(/&&|\|\||[;|\n]/)) {
 		const step = raw.replace(/\s*\d*[<>]+&?\s*\S+/g, "").trim();
 		const cd = /^cd\s+(\S+)$/.exec(step);
 		const m = cd ? null : STASH_STEP.exec(step);
-		const target = cd?.[1] ?? m?.[1];
+		const targets = cd ? [cd[1]] : [...(m?.[1] ?? "").matchAll(/-C\s+(\S+)/g)].map(t => t[1]);
 
-		if (target === "''") return steps;
+		if (targets.includes("''")) return steps;
 
 		if (cd) dir = toAbs(cd[1], dir);
+		else if (!m) changedBefore ||= step !== "";
 
 		if (!m) continue;
 		const [sub = "push", ...rest] = m[2].split(/\s+/).filter(Boolean);
 		const push = sub.startsWith("-") || sub === "push" || sub === "save";
 		const pop = (sub === "pop" || sub === "apply") && rest.every(a => a.startsWith("-"));
 		steps.push({
-			dir: target ? toAbs(target, dir) : dir,
+			dir: targets.reduce((at, t) => toAbs(t, at), dir),
 			act: push ? "push" : pop ? "pop" : "other",
 			untracked: push && [sub, ...rest].some(a => STASH_UNTRACKED.test(a)),
+			predictable: push && !changedBefore && (sub === "save" || wholeTreePush(sub === "push" ? rest : [sub, ...rest])),
 		});
 	}
 
@@ -957,7 +972,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (step.act === "push") {
 				const changes = git(["status", "--porcelain", `--untracked-files=${step.untracked ? "all" : "no"}`], top).out;
-				pushed.set(top, changes === "");
+				pushed.set(top, step.predictable && changes === "");
 				continue;
 			}
 
@@ -1093,13 +1108,17 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
 
+			// git prints one of these per push that runs, in order, unless the push is quiet.
+			const outcomes = text.match(/No local changes to save|Saved working directory/g) ?? [];
+
 			for (const step of parsed.success ? stashSteps(parsed.data.command ?? "", parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd) : []) {
 				const top = step.act === "other" ? undefined : git(["rev-parse", "--show-toplevel"], step.dir).out?.trim();
+				const outcome = step.act === "push" ? outcomes.shift() : undefined;
 
 				if (!top) continue;
 
-				if (step.act === "pop" || text.includes("Saved working directory")) noopStashRepos.delete(top);
-				else if (text.includes("No local changes to save")) noopStashRepos.add(top);
+				if (step.act === "pop" || outcome?.startsWith("Saved")) noopStashRepos.delete(top);
+				else if (outcome) noopStashRepos.add(top);
 			}
 
 			if (GRAPHQL_LIMIT.test(text)) {

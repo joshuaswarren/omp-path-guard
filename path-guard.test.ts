@@ -492,12 +492,22 @@ describe("bash: pop after a stash that saved nothing", () => {
 		execFileSync("git", ["-C", dirty, "stash", "push", "-qm", "older stash"], { stdio: "pipe" });
 		put(join(dirty, "a.txt"), "current work\n");
 		expect(call("bash", { command: "git stash && git pull --rebase && git stash pop", cwd: dirty })).toBeUndefined();
+		expect(call("bash", { command: "echo new > a.txt && git stash && git stash pop", cwd: stashed })).toBeUndefined();
+		expect(call("bash", { command: "git stash push -- a.txt && git stash pop", cwd: stashed })).toBeUndefined();
+		expect(call("bash", { command: "git --no-pager stash && git stash pop", cwd: stashed })).toMatchObject({ block: true });
 	});
 
 	test("quoted text that names git stash marks nothing", () => {
 		const { call, result } = load();
 		result("bash", { command: 'echo "git stash"', cwd: stashed }, "No local changes to save", false);
 		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
+
+	test("each push's own output marks its repository", () => {
+		const { call, result } = load();
+		const output = "No local changes to save\nSaved working directory and index state WIP on main";
+		result("bash", { command: `git -C ${stashed} stash; git -C ${code} stash`, cwd: base }, output, false);
+		expect(call("bash", { command: `git -C ${stashed} stash pop`, cwd: base })).toMatchObject({ block: true });
 	});
 });
 
