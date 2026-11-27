@@ -515,6 +515,36 @@ describe("bash: pop after a stash that saved nothing", () => {
 	});
 });
 
+describe("bash: git write after a cd that may fail", () => {
+	test("a cd into a missing directory, not joined by &&, is refused once before a git write", () => {
+		const { call } = load();
+		const command = `git worktree add ${base}/probe-wt main; cd ${base}/probe-wt; git sparse-checkout set docs`;
+		const held = call("bash", { command, cwd: code });
+		expect(held && "reason" in held ? held.reason : "").toContain(`'${code}'`);
+		expect(call("bash", { command, cwd: code })).toBeUndefined();
+		expect(call("bash", { command: `cd ${base}/gone && echo hi; git checkout main`, cwd: code })).toMatchObject({ block: true });
+	});
+
+	test("&&, set -e, exit, -C, an existing directory, and quoted text run unchanged", () => {
+		const { call } = load();
+
+		for (const command of [
+			`mkdir -p ${base}/made && cd ${base}/made && git init`,
+			`set -euo pipefail; cd ${base}/gone; git commit -m x`,
+			`set -o errexit; cd ${base}/gone; git commit -m x`,
+			"cd -; git commit -m x",
+			"cd $WORKTREE; git reset --hard",
+			`cd ${base}/gone || exit 1; git reset --hard`,
+			`cd ${base}/gone; git -C ${code} reset --hard`,
+			`cd ${code}; git reset --hard`,
+			`cd ${base}/gone; git status`,
+			`echo "cd ${base}/gone; git reset --hard"`,
+		]) {
+			expect(call("bash", { command, cwd: code })).toBeUndefined();
+		}
+	});
+});
+
 describe("bash: hand-completed SHA", () => {
 	// The real SHA's first 10 characters, then 30 that differ from it.
 	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);
