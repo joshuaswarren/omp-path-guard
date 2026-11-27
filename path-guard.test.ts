@@ -335,6 +335,27 @@ describe("find: judge timeout", () => {
 			join(docs, "packet/STATUS.json"),
 		);
 	});
+
+	test("after a timeout, the next find in the session gets the literal answer at once instead of a second 20 s wait", () => {
+		const { call, result } = load();
+		expect(call("find", { query: "lease expiry", grep_keywords: [], path: tree })).toBeUndefined();
+		result("find", { query: "where the lease is released", grep_keywords: [], path: tree }, TIMEOUT, true);
+		const next = call("find", { query: "lease expiry", grep_keywords: [], path: tree });
+		expect(next).toMatchObject({ block: true });
+		const reason = next && "reason" in next ? next.reason : "";
+		expect(reason).toContain("timed out in this session");
+		expect(reason).toContain(join(tree, "lease.md"));
+		expect(reason).not.toContain("other.md");
+	});
+
+	test("a find that answered, a partial answer, or a scope with no literal search runs unchanged", () => {
+		const { call, result } = load();
+		result("find", { query: "lease", grep_keywords: [], path: tree }, "1 hit(s) for lease", false);
+		result("find", { query: "lease", grep_keywords: [], path: tree }, "partial: timed out after 20.0s with 1 of 4 passages verified", false);
+		expect(call("find", { query: "lease expiry", grep_keywords: [], path: tree })).toBeUndefined();
+		result("find", { query: "lease", grep_keywords: [], path: tree }, TIMEOUT, true);
+		expect(call("find", { query: "lease expiry", grep_keywords: [], path: "skill://x" })).toBeUndefined();
+	});
 });
 
 describe("bash: GitHub owner typo", () => {

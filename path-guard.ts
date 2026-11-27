@@ -125,6 +125,9 @@ const MERGE_REBASE = /(?:^|\s)(?:--rebase|-r)(?=\s|$)/;
 
 // GitHub refills the GraphQL budget hourly; inside this window a gh pr retry fails the same way.
 const GRAPHQL_HOLD_MS = 10 * 60_000;
+
+// A judge that missed the 20 s find budget once in a session missed it on most later calls (65% of finds timed out, Nov 2026).
+const FIND_HOLD_MS = 10 * 60_000;
 const HERDR_LIST = /\bherdr\s+agent\s+list\b/;
 const JQ_ROOT_ERROR = /jq: error \(at <stdin>:\d+\): Cannot (?:index|iterate over)/;
 
@@ -843,16 +846,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const BashInput = z.object({ cwd: z.string().optional(), command: z.string().optional() });
 	const FindInput = z.object({ query: z.string(), grep_keywords: z.array(z.string()).optional(), path: z.string().optional() });
 
-	/** The lexical answer to a timed-out find; a URL scope or a killed search adds nothing. */
-	const findFallback = (event: ToolResultEvent, cwd: string): string[] => {
-		const parsed = FindInput.safeParse(event.input);
-
-		if (!event.isError || !parsed.success) return [];
-		const scope = parsed.data.path?.trim() ? parsed.data.path : cwd;
+	/** The lexical answer to a find; a URL scope or a killed search adds nothing. */
+	const findFallback = (find: { query: string; grep_keywords?: string[]; path?: string }, cwd: string): string[] => {
+		const scope = find.path?.trim() ? find.path : cwd;
 
 		if (!isLocalPath(scope) || !existsSync(toAbs(scope, cwd))) return [];
 		const root = toAbs(scope, cwd);
-		const keywords = findKeywords(parsed.data.query, parsed.data.grep_keywords ?? []);
+		const keywords = findKeywords(find.query, find.grep_keywords ?? []);
 
 		if (keywords.length === 0) return [];
 		const isFile = !isDir(root);
@@ -885,6 +885,27 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** When this session's GraphQL refusal is recent, the gh pr call it would retry. */
 	let graphqlSpentAt = Number.NEGATIVE_INFINITY;
+	/** When this session's last find timed out before its judge verified a hit. */
+	let findTimedOutAt = Number.NEGATIVE_INFINITY;
+
+	/** Answer a find with the literal search at once while this session's judge is missing the budget. */
+	const onFindCall = (event: ToolEvent, cwd: string): CallOutcome | undefined => {
+		const age = Date.now() - findTimedOutAt;
+
+		if (age >= FIND_HOLD_MS) return undefined;
+		const parsed = FindInput.safeParse(event.input);
+		const answer = parsed.success ? findFallback(parsed.data, cwd) : [];
+
+		if (answer.length === 0) return undefined;
+
+		return {
+			block: true,
+			reason: [
+				`[path-guard] find timed out in this session ${Math.round(age / 60_000)} min ago: its judge did not answer within the 20 s budget, so this call would likely wait 20 s and time out the same way. The literal search ran instead:`,
+				...answer,
+			].join("\n"),
+		};
+	};
 
 	/**
 	 * Refuse a bash command that carries a hand-completed full SHA, and name the real one; refuse a
@@ -930,6 +951,12 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (event.toolName === "edit") return onEditCall(event, ctx.cwd);
 
+			if (event.toolName === "find") {
+				const held = onFindCall(event, ctx.cwd);
+
+				if (held) return held;
+			}
+
 			if (!PATH_TOOLS.has(event.toolName)) return undefined;
 			const target = pathOf(event, ctx.cwd);
 
@@ -947,7 +974,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** Suggestion blocks for the missing paths behind a failed call. */
 	const suggestionsFor = (event: ToolResultEvent, cwd: string, text: string): string[] => {
-		if (event.toolName === "find" && FIND_TIMED_OUT.test(text.slice(0, 500))) return findFallback(event, cwd);
+		if (event.toolName === "find" && FIND_TIMED_OUT.test(text.slice(0, 500))) {
+			findTimedOutAt = Date.now();
+
+			const parsed = FindInput.safeParse(event.input);
+
+			return event.isError && parsed.success ? findFallback(parsed.data, cwd) : [];
+		}
 
 		if (event.toolName === "bash") {
 			const parsed = BashInput.safeParse(event.input);
