@@ -468,6 +468,37 @@ describe("bash: pop after a stash that saved nothing", () => {
 		result("bash", { command: "git stash", cwd: stashed }, "Saved working directory and index state WIP on main", false);
 		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
 	});
+
+	test("-C and cd name the repository on both sides; redirects do not hide the pop", () => {
+		const { call, result } = load();
+		result("bash", { command: `git -C ${stashed} stash`, cwd: code }, "No local changes to save", false);
+		const pop = call("bash", { command: `cd ${stashed} && git stash pop 2>&1`, cwd: code });
+		expect(pop && "reason" in pop ? pop.reason : "").toContain("old lane stash");
+		expect(call("bash", { command: `cd ${stashed} && git stash pop 2>&1`, cwd: code })).toBeUndefined();
+
+		const second = load();
+		second.result("bash", { command: `cd ${stashed}; git stash -q`, cwd: code }, "No local changes to save", false);
+		expect(second.call("bash", { command: `git -C ${stashed} stash pop`, cwd: code })).toMatchObject({ block: true });
+	});
+
+	test("a stash and a bare pop in one command are refused on a clean tree and run on a dirty one", () => {
+		const { call } = load();
+		const pop = call("bash", { command: "git stash && git pull --rebase && git stash pop", cwd: stashed });
+		expect(pop && "reason" in pop ? pop.reason : "").toContain("old lane stash");
+
+		const dirty = join(base, "dirty-stash");
+		repo(dirty, ["a.txt"]);
+		put(join(dirty, "a.txt"), "older work\n");
+		execFileSync("git", ["-C", dirty, "stash", "push", "-qm", "older stash"], { stdio: "pipe" });
+		put(join(dirty, "a.txt"), "current work\n");
+		expect(call("bash", { command: "git stash && git pull --rebase && git stash pop", cwd: dirty })).toBeUndefined();
+	});
+
+	test("quoted text that names git stash marks nothing", () => {
+		const { call, result } = load();
+		result("bash", { command: 'echo "git stash"', cwd: stashed }, "No local changes to save", false);
+		expect(call("bash", { command: "git stash pop", cwd: stashed })).toBeUndefined();
+	});
 });
 
 describe("bash: hand-completed SHA", () => {

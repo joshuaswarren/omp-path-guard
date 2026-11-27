@@ -139,10 +139,10 @@ const FULL_SHA = /(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])/g;
 // Shared leading characters that make "same commit" certain; below 8 a remote-only commit could collide.
 const SHA_PREFIXES = [12, 10, 8];
 const NOTE_COMMAND = /(?:^|[\s;&|(/])agent-note(?:\s|$)/;
-const STASH_COMMAND = /\bgit\s+(?:-C\s+\S+\s+)?stash\b/;
 
-// A pop or apply that names no stash takes stash@{0}, whoever saved it.
-const BARE_STASH_POP = /\bgit\s+(?:-C\s+\S+\s+)?stash\s+(?:pop|apply)(?:\s+-[\w-]+)*\s*(?:$|[;&|)])/;
+// One shell step that runs git stash; -C names the repository. Group 2 is the subcommand and its arguments.
+const STASH_STEP = /^(?:\w+=\S*\s+)*git\s+(?:-c\s+\S+\s+)*(?:-C\s+(\S+)\s+)?stash\b\s*(.*)$/;
+const STASH_UNTRACKED = /^(?:-u|-a|--include-untracked|--all)$/;
 
 export function expandHome(p: string): string {
 	if (p === "~") return homedir();
@@ -804,6 +804,48 @@ export function shellRuns(command: string): ShellRun[] {
 	return runs;
 }
 
+interface StashStep {
+	/** The directory git runs in, after cd and -C. */
+	dir: string;
+	/** push saves the tree; pop is a pop or apply that names no stash, so it takes stash@{0}, whoever saved it. */
+	act: "push" | "pop" | "other";
+	/** The push also saves untracked files. */
+	untracked: boolean;
+}
+
+/** The git stash steps of `command`, in order; quoted text is data, and a quoted cd or -C target ends the walk. */
+export function stashSteps(command: string, cwd: string): StashStep[] {
+	const code = shellRuns(command)
+		.map(r => (r.code ? r.text : " '' "))
+		.join("");
+
+	const steps: StashStep[] = [];
+	let dir = cwd;
+
+	for (const raw of code.split(/&&|\|\||[;|\n]/)) {
+		const step = raw.replace(/\s*\d*[<>]+&?\s*\S+/g, "").trim();
+		const cd = /^cd\s+(\S+)$/.exec(step);
+		const m = cd ? null : STASH_STEP.exec(step);
+		const target = cd?.[1] ?? m?.[1];
+
+		if (target === "''") return steps;
+
+		if (cd) dir = toAbs(cd[1], dir);
+
+		if (!m) continue;
+		const [sub = "push", ...rest] = m[2].split(/\s+/).filter(Boolean);
+		const push = sub.startsWith("-") || sub === "push" || sub === "save";
+		const pop = (sub === "pop" || sub === "apply") && rest.every(a => a.startsWith("-"));
+		steps.push({
+			dir: target ? toAbs(target, dir) : dir,
+			act: push ? "push" : pop ? "pop" : "other",
+			untracked: push && [sub, ...rest].some(a => STASH_UNTRACKED.test(a)),
+		});
+	}
+
+	return steps;
+}
+
 /**
  * Home typos in the unquoted part of a local command. Quoted text may be data (an agent-note about the
  * typo), and a remote command's paths belong to another machine, so neither counts.
@@ -896,13 +938,43 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	/** Repositories where this session's last git stash saved nothing. */
 	const noopStashRepos = new Set<string>();
 
-	/** The older stash a bare pop would apply after a stash that saved nothing; asked once per such stash. */
-	const takeNoopStash = (cwd: string): string | undefined => {
-		const top = git(["rev-parse", "--show-toplevel"], cwd).out?.trim();
+	/** Bare pops already refused once; the same command asked again runs. */
+	const refusedPops = new Set<string>();
 
-		if (!top || !noopStashRepos.delete(top)) return undefined;
+	/**
+	 * The older stash a bare pop in `command` would apply because the stash before it saves nothing:
+	 * a push earlier in the same command on a clean tree, or this session's last push in that repository.
+	 */
+	const foreignStash = (command: string, cwd: string): string | undefined => {
+		if (refusedPops.has(command)) return undefined;
+		/** Repository → whether this command's own push saves nothing. */
+		const pushed = new Map<string, boolean>();
 
-		return git(["stash", "list", "-1", "--format=%gd (%cr): %s"], top).out?.trim() || undefined;
+		for (const step of stashSteps(command, cwd)) {
+			const top = step.act === "other" ? undefined : git(["rev-parse", "--show-toplevel"], step.dir).out?.trim();
+
+			if (!top) continue;
+
+			if (step.act === "push") {
+				const changes = git(["status", "--porcelain", `--untracked-files=${step.untracked ? "all" : "no"}`], top).out;
+				pushed.set(top, changes === "");
+				continue;
+			}
+
+			const savesNothing = pushed.get(top) ?? noopStashRepos.has(top);
+			pushed.set(top, false);
+
+			if (!savesNothing) continue;
+			const old = git(["stash", "list", "-1", "--format=%gd (%cr): %s"], top).out?.trim();
+
+			if (!old) continue;
+			noopStashRepos.delete(top);
+			refusedPops.add(command);
+
+			return old;
+		}
+
+		return undefined;
 	};
 
 	/** Answer a find with the literal search at once while this session's judge is missing the budget. */
@@ -950,12 +1022,12 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		}
 
 		const bashCwd = parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd;
-		const oldStash = BARE_STASH_POP.test(runs.join(" ")) ? takeNoopStash(bashCwd) : undefined;
+		const oldStash = foreignStash(command, bashCwd);
 
 		if (oldStash) {
 			return {
 				block: true,
-				reason: `[path-guard] git stash in this session saved nothing ("No local changes to save"), so this pop would apply an older stash: ${oldStash}. Name the stash (git stash list; git stash pop stash@{N}) or repeat this command if you mean it.`,
+				reason: `[path-guard] the git stash before this pop saves nothing (clean tree, or "No local changes to save" earlier in this session), so the bare pop would apply an older stash: ${oldStash}. Name the stash (git stash list; git stash pop stash@{N}) or repeat this command if you mean it.`,
 			};
 		}
 
@@ -1021,11 +1093,13 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 			if (parsed.success) typos.push(...herdrHints(parsed.data.command ?? "", text));
 
-			if (parsed.success && STASH_COMMAND.test(parsed.data.command ?? "")) {
-				const top = git(["rev-parse", "--show-toplevel"], parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd).out?.trim();
+			for (const step of parsed.success ? stashSteps(parsed.data.command ?? "", parsed.data.cwd ? toAbs(parsed.data.cwd, cwd) : cwd) : []) {
+				const top = step.act === "other" ? undefined : git(["rev-parse", "--show-toplevel"], step.dir).out?.trim();
 
-				if (top && text.includes("No local changes to save")) noopStashRepos.add(top);
-				else if (top && text.includes("Saved working directory")) noopStashRepos.delete(top);
+				if (!top) continue;
+
+				if (step.act === "pop" || text.includes("Saved working directory")) noopStashRepos.delete(top);
+				else if (text.includes("No local changes to save")) noopStashRepos.add(top);
 			}
 
 			if (GRAPHQL_LIMIT.test(text)) {
