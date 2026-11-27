@@ -560,6 +560,8 @@ describe("bash: a commit the clone does not hold", () => {
 			["curl https://example.com", "error: token f47ac10b0e02 expired at 1764250000", code],
 			["git push origin main", "error: request f47ac10b-58cc-4372-a567-0e02b2c3d479 rate-limited", code],
 			[`git -C ${base} log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`git -C${base} log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`git --git-dir=${base}/.git log ddd95a7`, "fatal: bad object ddd95a7", code],
 			["git log ddd95a7", "fatal: not a git repository; ddd95a7", base],
 		]) {
 			expect(lastText(result("bash", { command, cwd }, text, true))).not.toContain("names no object");
