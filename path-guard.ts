@@ -740,17 +740,30 @@ export function inventedShas(command: string, cwd: string): [string, string][] {
 	return found;
 }
 
-/** A command that sends data to GitHub, where a wrong SHA is accepted or fails late instead of failing locally. */
-export function remoteWrite(command: string): boolean {
-	return /\bgh\s|\bcurl\s[^;&|\n]*github/.test(command);
+/**
+ * The lines of `command` that write to GitHub: a gh comment, review, merge, create or edit, a gh api call
+ * with fields or a non-GET method, or a curl to GitHub that sends data. A wrong SHA there is accepted or
+ * fails late; a read fails at once and does no harm.
+ */
+export function remoteWrites(command: string): string {
+	const gh = /\bgh\s+(?:(?:pr|issue)\s+(?:comment|review|merge|create|edit|close)|release\s+create)\b/;
+	const api = /\bgh\s+api\b.*\s(?:-[fF]|--field|--raw-field|--input|-X\s*(?!GET\b)[A-Z]|--method[=\s]+(?!GET\b)[A-Z])/;
+	const sends = /\s(?:-d|--data[\w-]*|-T|--upload-file|-X\s*(?!GET\b)[A-Z]|--request[=\s]+(?!GET\b)[A-Z])/;
+
+	return command
+		.split("\n")
+		.filter(l => gh.test(l) || api.test(l) || (/\bcurl\b/.test(l) && /github/.test(l) && sends.test(l)))
+		.join("\n");
 }
 
-/** Each 40-hex SHA in `command` that `known` does not accept and that is no commit of the repository at `cwd`. */
-export function unseenShas(command: string, cwd: string, known: (sha: string) => boolean): string[] {
-	if (NOTE_COMMAND.test(command)) return [];
+/** Each 40-hex SHA in `text` that `known` does not accept and that is no commit of the repository at `cwd`. */
+export function unseenShas(text: string, cwd: string, known: (sha: string) => boolean): string[] {
+	const shas = [...new Set(text.match(FULL_SHA) ?? [])].filter(sha => !known(sha));
 
-	return [...new Set(command.match(FULL_SHA) ?? [])].filter(sha => {
-		if (known(sha)) return false;
+	// Outside a work tree no SHA can be checked, so none is refused.
+	if (NOTE_COMMAND.test(text) || shas.length === 0 || git(["rev-parse", "--is-inside-work-tree"], cwd).out?.trim() !== "true") return [];
+
+	return shas.filter(sha => {
 		const local = git(["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], cwd);
 
 		return local.answered && local.out === undefined;
@@ -1157,7 +1170,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		const shas = inventedShas(command, bashCwd);
 
 		if (shas.length === 0) {
-			const unseen = remoteWrite(command) ? unseenShas(command, bashCwd, s => seenShas.has(s) || refusedShas.has(s)) : [];
+			const unseen = unseenShas(remoteWrites(command), bashCwd, s => seenShas.has(s) || refusedShas.has(s));
 
 			if (unseen.length === 0) return undefined;
 

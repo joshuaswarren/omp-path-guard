@@ -581,6 +581,12 @@ describe("bash: hand-completed SHA", () => {
 		result("bash", { command: "gh api repos/joshuaswarren/blend/pulls/7 --jq .head.sha", cwd: code }, `${copied}\n`, false);
 		expect(call("bash", { command: `gh pr comment 7 --body "Tested ${copied}"`, cwd: code })).toBeUndefined();
 		expect(call("bash", { command: `git fetch origin ${"1234abcd".repeat(5)}`, cwd: code })).toBeUndefined();
+
+		const other = "5e6f7a8b9c".repeat(4);
+		expect(call("bash", { command: `gh api repos/joshuaswarren/blend/commits/${other}`, cwd: code })).toBeUndefined();
+		expect(call("bash", { command: `curl -LO https://github.com/joshuaswarren/blend/archive/${other}.tar.gz`, cwd: code })).toBeUndefined();
+		expect(call("bash", { command: `gh pr comment 7 --body "Tested ${other}"`, cwd: plain })).toBeUndefined();
+		expect(call("bash", { command: `gh pr comment 7 --body "Tested ${other}"`, cwd: code })).toMatchObject({ block: true });
 	});
 });
 
