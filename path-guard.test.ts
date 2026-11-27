@@ -545,6 +545,37 @@ describe("bash: git write after a cd that may fail", () => {
 	});
 });
 
+describe("bash: a commit the clone does not hold", () => {
+	test("git's error names a missing commit: the result says to fetch; local objects, numbers, -C, and non-repositories get nothing", () => {
+		const { result, lastText } = load();
+		const head = execFileSync("git", ["-C", code, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+		const blob = execFileSync("git", ["-C", code, "rev-parse", "HEAD:"], { encoding: "utf8" }).trim();
+		const missing = result("bash", { command: "git merge-base --is-ancestor ddd95a7 HEAD", cwd: code }, "fatal: Not a valid object name ddd95a7", true);
+		expect(lastText(missing)).toContain("'ddd95a7' names no object in the clone");
+		expect(lastText(missing)).toContain("git fetch origin ddd95a7");
+
+		for (const [command, text, cwd] of [
+			[`git show ${head}:nope`, `fatal: path 'nope' does not exist in '${head}'`, code],
+			[`git log ${blob}`, `fatal: bad object ${blob}`, code],
+			["curl https://example.com", "error: token f47ac10b0e02 expired at 1764250000", code],
+			["git push origin main", "error: request f47ac10b-58cc-4372-a567-0e02b2c3d479 rate-limited", code],
+			[`git -C ${base} log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`git -C${base} log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`git --git-dir=${base}/.git log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`cd ${base} && git log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`bash -c 'cd ${base} && git log ddd95a7'`, "fatal: bad object ddd95a7", code],
+			["git status && ./deploy.sh", "error: checksum f47ac10 mismatch", code],
+			["ssh ci 'git log ddd95a7'", "fatal: bad object ddd95a7", code],
+			[`if true; then cd ${base}; fi; git log ddd95a7`, "fatal: bad object ddd95a7", code],
+			[`env -C ${base} git log ddd95a7`, "fatal: bad object ddd95a7", code],
+			["git log artifacts/f47ac10", "fatal: ambiguous argument 'artifacts/f47ac10': unknown revision or path not in the working tree.", code],
+			["git log ddd95a7", "fatal: not a git repository; ddd95a7", base],
+		]) {
+			expect(lastText(result("bash", { command, cwd }, text, true))).not.toContain("names no object");
+		}
+	});
+});
+
 describe("bash: hand-completed SHA", () => {
 	// The real SHA's first 10 characters, then 30 that differ from it.
 	const invent = (real: string) => real.slice(0, 10) + (real[10] === "0" ? "1" : "0").repeat(30);
