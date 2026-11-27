@@ -346,12 +346,14 @@ describe("find: judge timeout", () => {
 		expect(reason).toContain("timed out in this session");
 		expect(reason).toContain(join(tree, "lease.md"));
 		expect(reason).not.toContain("other.md");
+		expect(call("find", { query: "lease expiry", grep_keywords: [], path: tree })).toBeUndefined();
 	});
 
-	test("a find that answered, a partial answer, or a scope with no literal search runs unchanged", () => {
+	test("a find that answered, a partial or quoted timeout, or a scope with no literal search runs unchanged", () => {
 		const { call, result } = load();
 		result("find", { query: "lease", grep_keywords: [], path: tree }, "1 hit(s) for lease", false);
 		result("find", { query: "lease", grep_keywords: [], path: tree }, "partial: timed out after 20.0s with 1 of 4 passages verified", false);
+		result("find", { query: "timeout text", grep_keywords: [], path: tree }, `1 hit(s): notes.md:3 ${TIMEOUT}`, false);
 		expect(call("find", { query: "lease expiry", grep_keywords: [], path: tree })).toBeUndefined();
 		result("find", { query: "lease", grep_keywords: [], path: tree }, TIMEOUT, true);
 		expect(call("find", { query: "lease expiry", grep_keywords: [], path: "skill://x" })).toBeUndefined();

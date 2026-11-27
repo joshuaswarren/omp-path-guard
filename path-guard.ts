@@ -846,8 +846,8 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	const BashInput = z.object({ cwd: z.string().optional(), command: z.string().optional() });
 	const FindInput = z.object({ query: z.string(), grep_keywords: z.array(z.string()).optional(), path: z.string().optional() });
 
-	/** The lexical answer to a find; a URL scope or a killed search adds nothing. */
-	const findFallback = (find: { query: string; grep_keywords?: string[]; path?: string }, cwd: string): string[] => {
+	/** The lexical answer to a find: none for a URL or missing scope, undefined when the search was killed. */
+	const findFallback = (find: { query: string; grep_keywords?: string[]; path?: string }, cwd: string): string[] | undefined => {
 		const scope = find.path?.trim() ? find.path : cwd;
 
 		if (!isLocalPath(scope) || !existsSync(toAbs(scope, cwd))) return [];
@@ -858,7 +858,7 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 		const isFile = !isDir(root);
 		const entries = isFile ? lexicalLines(root, keywords) : lexicalMatches(root, keywords)?.map(m => `${m.path} (${m.hits})`);
 
-		return entries ? [formatFallback(root, keywords, entries, isFile)] : [];
+		return entries ? [formatFallback(root, keywords, entries, isFile)] : undefined;
 	};
 
 	/** The local path a path tool targets, without a read selector. */
@@ -887,23 +887,29 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 	let graphqlSpentAt = Number.NEGATIVE_INFINITY;
 	/** When this session's last find timed out before its judge verified a hit. */
 	let findTimedOutAt = Number.NEGATIVE_INFINITY;
+	/** Finds already refused once; the same find asked again runs, so the agent can still reach the judge. */
+	const refusedFinds = new Set<string>();
 
 	/** Answer a find with the literal search at once while this session's judge is missing the budget. */
 	const onFindCall = (event: ToolEvent, cwd: string): CallOutcome | undefined => {
 		const age = Date.now() - findTimedOutAt;
-
-		if (age >= FIND_HOLD_MS) return undefined;
 		const parsed = FindInput.safeParse(event.input);
-		const answer = parsed.success ? findFallback(parsed.data, cwd) : [];
 
-		if (answer.length === 0) return undefined;
+		if (age >= FIND_HOLD_MS || !parsed.success) return undefined;
+		const key = JSON.stringify([parsed.data.query, toAbs(parsed.data.path?.trim() || ".", cwd)]);
+
+		if (refusedFinds.has(key)) return undefined;
+		const answer = findFallback(parsed.data, cwd);
+
+		if (answer?.length === 0) return undefined;
+		refusedFinds.add(key);
+		const why = `[path-guard] find timed out in this session ${Math.max(1, Math.round(age / 60_000))} min ago or less: its judge did not answer within the 20 s budget, so this call would likely wait 20 s and time out the same way. Repeat this exact find to run it anyway.`;
 
 		return {
 			block: true,
-			reason: [
-				`[path-guard] find timed out in this session ${Math.round(age / 60_000)} min ago: its judge did not answer within the 20 s budget, so this call would likely wait 20 s and time out the same way. The literal search ran instead:`,
-				...answer,
-			].join("\n"),
+			reason: answer
+				? [`${why} The literal search ran instead:`, ...answer].join("\n")
+				: `${why} The literal search of that scope did not finish in 8 s either; narrow path, or grep a known directory.`,
 		};
 	};
 
@@ -974,12 +980,11 @@ export default function pathGuard(pi: Api, config?: GuardConfig): PathGuard {
 
 	/** Suggestion blocks for the missing paths behind a failed call. */
 	const suggestionsFor = (event: ToolResultEvent, cwd: string, text: string): string[] => {
-		if (event.toolName === "find" && FIND_TIMED_OUT.test(text.slice(0, 500))) {
+		if (event.toolName === "find" && event.isError && FIND_TIMED_OUT.test(text.slice(0, 500))) {
 			findTimedOutAt = Date.now();
-
 			const parsed = FindInput.safeParse(event.input);
 
-			return event.isError && parsed.success ? findFallback(parsed.data, cwd) : [];
+			return parsed.success ? (findFallback(parsed.data, cwd) ?? []) : [];
 		}
 
 		if (event.toolName === "bash") {

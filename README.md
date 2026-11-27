@@ -40,9 +40,10 @@ Five related dead ends get a hint in the failed result:
   installed) for the query's words in the same scope. It lists the files with
   the most matches, or the matching lines when the scope is one file. A search
   that is killed or errors adds nothing. For 10 minutes after such a timeout,
-  a later `find` in the same session is refused with that literal search for
-  its own query, so it does not wait 20 s for the same slow judge. A scope with
-  no literal answer (a URL, a missing path) still runs `find`.
+  a later `find` in the same session is refused once with that literal search
+  for its own query, so it does not wait 20 s for the same slow judge; the
+  same `find` asked again runs. A scope with no literal answer (a URL, a
+  missing path) still runs `find`.
 - **GitHub owner typo**: when a `bash` command that names `joshuawarren/<repo>`
   on GitHub gets a 404, the result names the real owner `joshuaswarren/<repo>`.
   The `Joshuawarren` account belongs to someone else, so the 404 is the typo,
